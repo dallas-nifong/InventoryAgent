@@ -70,6 +70,14 @@ BENCHMARK_SCENARIOS = [
     },
 ]
 
+MODEL_DISPLAY_NAMES: Dict[str, str] = {
+    "EOQ": "EOQ",
+    "QUANTITY_DISCOUNT": "Quantity Discount",
+    "SAFETY_STOCK_ROP": "Safety Stock & ROP",
+    "FIXED_PERIOD_REVIEW": "Fixed-Period Review",
+    "NEWSVENDOR": "Newsvendor",
+}
+
 
 def run_cli_single(agent: InventoryAgent, question: str):
     """Run agent on a single question and display structured analytical output."""
@@ -477,6 +485,15 @@ def run_streamlit_app():
             font-weight: 600;
             border: 1px solid var(--text-color);
         }
+        /* Prevent truncation in metric cards: wrap text and use smaller responsive font */
+        [data-testid="stMetricValue"], [data-testid="stMetricValue"] > div {
+            white-space: normal !important;
+            word-break: break-word !important;
+            overflow-wrap: anywhere !important;
+            font-size: 1.15rem !important;
+            line-height: 1.3 !important;
+            text-overflow: clip !important;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -694,7 +711,8 @@ def run_streamlit_app():
         st.subheader("🔍 Execution Pipeline Inspection")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.metric("Identified Model", resp.model_name)
+            display_model_name = MODEL_DISPLAY_NAMES.get(resp.model_name, resp.model_name)
+            st.metric("Identified Model", display_model_name)
         with c2:
             st.metric(
                 "Match Strength",
