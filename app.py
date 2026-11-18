@@ -251,6 +251,15 @@ def calculate_inventory_dataframe_metrics(df: Any) -> Dict[str, Any]:
 # STREAMLIT DISPLAY & FORMATTING HELPERS
 # =============================================================================
 
+def remove_null_values(obj: Any) -> Any:
+    """Recursively remove keys or list items with None / null values."""
+    if isinstance(obj, dict):
+        return {k: remove_null_values(v) for k, v in obj.items() if v is not None}
+    elif isinstance(obj, list):
+        return [remove_null_values(item) for item in obj if item is not None]
+    return obj
+
+
 def escape_dollars(text: str) -> str:
     """
     Escape dollar signs at display time so every dollar sign outside inline code
@@ -375,7 +384,7 @@ def get_plain_language_recommendation(resp_or_result: Any, model_name: Optional[
 
     if m == "EOQ":
         ct_m = getattr(res, "cycle_time_months", None)
-        cadence = f"{ct_m:.1f} months" if ct_m is not None else f"{getattr(res, 'cycle_time_days', 0):.0f} work days"
+        cadence = f"{ct_m:.2f} months" if ct_m is not None else f"{getattr(res, 'cycle_time_days', 0):.0f} work days"
         qty = getattr(res, "rounded_eoq", getattr(res, "rounded_order_quantity", 0))
         opy = getattr(res, "orders_per_year", 0.0)
         cost = getattr(res, "annual_inventory_cost", 0.0)
@@ -478,6 +487,8 @@ def run_streamlit_app():
     # Session State Management for running behavior
     if "current_question" not in st.session_state:
         st.session_state["current_question"] = BENCHMARK_SCENARIOS[0]["question"]
+    if "query_text_area" not in st.session_state:
+        st.session_state["query_text_area"] = BENCHMARK_SCENARIOS[0]["question"]
     if "latest_response" not in st.session_state:
         st.session_state["latest_response"] = None
     if "prev_scenario" not in st.session_state:
@@ -503,6 +514,7 @@ def run_streamlit_app():
                 for s in BENCHMARK_SCENARIOS:
                     if s["name"] == selected_scenario:
                         st.session_state["current_question"] = s["question"]
+                        st.session_state["query_text_area"] = s["question"]
                         benchmark_selected = True
                         break
 
@@ -617,7 +629,6 @@ def run_streamlit_app():
     # -------------------------------------------------------------------------
     query = st.text_area(
         "Enter your natural language inventory question:",
-        value=st.session_state["current_question"],
         height=100,
         placeholder="e.g., Annual demand is 5000, setup cost is $40, supplier price breaks are...",
         key="query_text_area",
@@ -747,7 +758,10 @@ def run_streamlit_app():
         with tab_student:
             st.markdown("## 🎓 Step-by-Step Verification")
             st.caption("All calculation steps below originate deterministically from Python operations research tools.")
-            report_lines = agent._format_verification_report(resp.model_name, resp.calculation_result, resp.verification)
+            report_lines = [
+                line for line in agent._format_verification_report(resp.model_name, resp.calculation_result, resp.verification)
+                if "Student Verification Report" not in line
+            ]
             report_md = "\n".join(report_lines)
             st.markdown(escape_dollars(report_md))
 
@@ -772,12 +786,8 @@ def run_streamlit_app():
 
         with tab_inputs:
             st.subheader("📥 Extracted Parameters")
-            st.json(resp.inputs_extracted)
-
-            if resp.variable_definitions:
-                st.markdown("### 📖 Variable Definitions")
-                for var, defn in resp.variable_definitions.items():
-                    st.markdown(f"- **`{var}`**: {escape_dollars(defn)}")
+            filtered_inputs = remove_null_values(resp.inputs_extracted)
+            st.json(filtered_inputs)
 
             conv_notes = [n for n in getattr(resp.verification, "notes", []) if "converted" in str(n).lower() or "risk" in str(n).lower()]
             if conv_notes:

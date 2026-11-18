@@ -144,7 +144,7 @@ def build_eoq_chart(data: Dict[str, Any]) -> Any:
 
     text = (
         alt.Chart(opt_df)
-        .mark_text(dy=-16, fontSize=11, fontWeight="bold")
+        .mark_text(dy=-16, fontSize=11, fontWeight="bold", color="#d62728")
         .encode(
             x="Order Quantity (units):Q",
             y="Annual Cost ($/year):Q",
@@ -259,7 +259,7 @@ def build_quantity_discount_chart(data: Dict[str, Any]) -> Any:
 
     text = (
         alt.Chart(df)
-        .mark_text(dy=-10, fontSize=11, fontWeight="bold")
+        .mark_text(dy=-10, fontSize=11, fontWeight="bold", color="#1f77b4")
         .encode(
             x=alt.X("Price Tier:N", sort=None),
             y=alt.Y("Total Annual Cost ($/year):Q"),
