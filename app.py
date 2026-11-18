@@ -12,10 +12,12 @@ Customer Question -> Identify Model -> Extract Inputs -> Select Tool -> Calculat
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import io
 import json
+import re
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 try:
     import pandas as pd
@@ -23,6 +25,7 @@ except ImportError:
     pd = None
 
 from inventory_agent import AgentResponse, InventoryAgent
+from chart_helpers import build_model_chart
 
 
 # =============================================================================
@@ -245,6 +248,192 @@ def calculate_inventory_dataframe_metrics(df: Any) -> Dict[str, Any]:
 
 
 # =============================================================================
+# STREAMLIT DISPLAY & FORMATTING HELPERS
+# =============================================================================
+
+def escape_dollars(text: str) -> str:
+    """
+    Escape dollar signs at display time so every dollar sign outside inline code
+    shows as plain text instead of being interpreted as LaTeX math by Streamlit / Markdown.
+    Includes currency amounts ($707.11) and unit labels like ($/order).
+    Leaves inline code spans (`...` or ```...```) untouched.
+    """
+    if not isinstance(text, str):
+        return text
+    # Split text by inline code spans (`...` or ```...```)
+    # Even tokens are outside code, odd tokens are inside code
+    tokens = re.split(r"(`+[\s\S]*?`+)", text)
+    out = []
+    for i, token in enumerate(tokens):
+        if i % 2 == 1:
+            # Inside inline code: preserve as-is
+            out.append(token)
+        else:
+            # Outside inline code: escape any unescaped dollar sign
+            out.append(re.sub(r"(?<!\\)\$", r"\$", token))
+    return "".join(out)
+
+
+def get_model_metric_cards(resp_or_result: Any, model_name: Optional[str] = None) -> List[Tuple[str, str]]:
+    """
+    Returns a list of (label, formatted_value) tuples for the 4 key metric cards:
+    - EOQ: order quantity, orders per year, months between orders, total annual inventory cost
+    - Quantity Discount: order quantity, unit price, total annual cost, annual savings
+    - Safety Stock / ROP: safety stock, reorder point, service level, z value
+    - Fixed-Period Review: amount to order, target inventory, protection period, safety stock
+    - Newsvendor: order quantity, critical ratio, underage cost, overage cost
+    """
+    if resp_or_result is None:
+        return []
+    if hasattr(resp_or_result, "calculation_result"):
+        res = resp_or_result.calculation_result
+        m = resp_or_result.model_name
+    else:
+        res = resp_or_result
+        m = model_name or getattr(res, "model_name", "")
+
+    if res is None:
+        return []
+
+    if m == "EOQ":
+        qty = getattr(res, "rounded_eoq", getattr(res, "rounded_order_quantity", 0))
+        opy = getattr(res, "orders_per_year", 0.0)
+        ct_m = getattr(res, "cycle_time_months", None)
+        months_str = f"{ct_m:.2f} months" if ct_m is not None else "N/A"
+        cost = getattr(res, "annual_inventory_cost", 0.0)
+        return [
+            ("Order Quantity", f"{qty:,} units"),
+            ("Orders Per Year", f"{opy:.2f}"),
+            ("Months Between Orders", months_str),
+            ("Total Annual Cost", f"${cost:,.2f}"),
+        ]
+    elif m == "QUANTITY_DISCOUNT":
+        qty = getattr(res, "rounded_optimal_quantity", 0)
+        p = getattr(res, "optimal_unit_price", 0.0)
+        tc = getattr(res, "min_total_annual_cost", 0.0)
+        sav = getattr(res, "annual_savings", 0.0)
+        return [
+            ("Order Quantity", f"{qty:,} units"),
+            ("Unit Price", f"${p:,.2f}"),
+            ("Total Annual Cost", f"${tc:,.2f}"),
+            ("Annual Savings", f"${sav:,.2f}"),
+        ]
+    elif m == "SAFETY_STOCK_ROP":
+        ss = getattr(res, "rounded_safety_stock", 0)
+        rop = getattr(res, "rounded_reorder_point", 0)
+        sl = getattr(res, "service_level", None)
+        sl_str = f"{sl * 100:.1f}%" if sl is not None else "N/A"
+        z = getattr(res, "z_score", None)
+        z_str = f"{z:.2f}" if z is not None else "N/A"
+        return [
+            ("Safety Stock", f"{ss:,} units"),
+            ("Reorder Point", f"{rop:,} units"),
+            ("Service Level", sl_str),
+            ("z Value", z_str),
+        ]
+    elif m == "FIXED_PERIOD_REVIEW":
+        q = getattr(res, "rounded_order_quantity", 0)
+        s = getattr(res, "rounded_target_inventory", 0)
+        t_unit = getattr(res, "time_unit", "day")
+        pp = getattr(res, "protection_period", 0.0)
+        ss = getattr(res, "rounded_safety_stock", 0)
+        return [
+            ("Amount to Order", f"{q:,} units"),
+            ("Target Inventory", f"{s:,} units"),
+            ("Protection Period", f"{pp:.1f} {t_unit}s"),
+            ("Safety Stock", f"{ss:,} units"),
+        ]
+    elif m == "NEWSVENDOR":
+        q = getattr(res, "rounded_optimal_quantity", 0)
+        cr = getattr(res, "critical_ratio", 0.0)
+        cu = getattr(res, "underage_cost", 0.0)
+        co = getattr(res, "overage_cost", 0.0)
+        return [
+            ("Order Quantity", f"{q:,} units"),
+            ("Critical Ratio", f"{cr * 100:.1f}%"),
+            ("Underage Cost", f"${cu:,.2f}"),
+            ("Overage Cost", f"${co:,.2f}"),
+        ]
+    return []
+
+
+def get_plain_language_recommendation(resp_or_result: Any, model_name: Optional[str] = None) -> str:
+    """
+    Returns a concise two or three sentence plain-language operational recommendation.
+    """
+    if resp_or_result is None:
+        return ""
+    if hasattr(resp_or_result, "calculation_result"):
+        res = resp_or_result.calculation_result
+        m = resp_or_result.model_name
+    else:
+        res = resp_or_result
+        m = model_name or getattr(res, "model_name", "")
+
+    if res is None:
+        return ""
+
+    if m == "EOQ":
+        ct_m = getattr(res, "cycle_time_months", None)
+        cadence = f"{ct_m:.1f} months" if ct_m is not None else f"{getattr(res, 'cycle_time_days', 0):.0f} work days"
+        qty = getattr(res, "rounded_eoq", getattr(res, "rounded_order_quantity", 0))
+        opy = getattr(res, "orders_per_year", 0.0)
+        cost = getattr(res, "annual_inventory_cost", 0.0)
+        return (
+            f"Place replenishment orders of **{qty:,} units** approximately every **{cadence}** "
+            f"({opy:.1f} orders per year). This order quantity balances setup costs against carrying charges, "
+            f"achieving a minimum total annual inventory cost of **${cost:,.2f}**."
+        )
+    elif m == "QUANTITY_DISCOUNT":
+        qty = getattr(res, "rounded_optimal_quantity", 0)
+        p = getattr(res, "optimal_unit_price", 0.0)
+        tier_idx = getattr(res, "optimal_tier_index", 0) + 1
+        tc = getattr(res, "min_total_annual_cost", 0.0)
+        sav = getattr(res, "annual_savings", 0.0)
+        savings_clause = f" with net annual savings of **${sav:,.2f}** versus the baseline tier" if sav > 0 else " as the baseline price structure remains the most cost-effective"
+        return (
+            f"Order **{qty:,} units** at **${p:,.2f}** per unit to qualify for Tier {tier_idx}. "
+            f"This batch size balances purchasing discounts against additional holding charges, "
+            f"securing a minimum total annual cost of **${tc:,.2f}**{savings_clause}."
+        )
+    elif m == "SAFETY_STOCK_ROP":
+        rop = getattr(res, "rounded_reorder_point", 0)
+        ss = getattr(res, "rounded_safety_stock", 0)
+        sl = getattr(res, "service_level", None)
+        sl_pct = f"{sl * 100:.1f}%" if sl is not None else "prescribed"
+        return (
+            f"Set your reorder point at **{rop:,} units**, including a buffer of **{ss:,} units** for safety stock. "
+            f"Trigger a replenishment order whenever inventory drops to or below this threshold to protect against demand and lead-time variability. "
+            f"This operational policy ensures your target **{sl_pct}** cycle service level is maintained."
+        )
+    elif m == "FIXED_PERIOD_REVIEW":
+        q = getattr(res, "rounded_order_quantity", 0)
+        s = getattr(res, "rounded_target_inventory", 0)
+        t_unit = getattr(res, "time_unit", "day")
+        t = getattr(res, "review_period", 0)
+        ss = getattr(res, "rounded_safety_stock", 0)
+        pp = getattr(res, "protection_period", 0)
+        return (
+            f"Order **{q:,} units** to return your inventory position to the order-up-to target of **{s:,} units**. "
+            f"Maintain a strict review interval of every **{t:,.0f} {t_unit}s**, holding **{ss:,} units** in buffer stock. "
+            f"This policy provides continuous coverage across the entire {pp:.0f}-{t_unit} protection period."
+        )
+    elif m == "NEWSVENDOR":
+        q = getattr(res, "rounded_optimal_quantity", 0)
+        cr = getattr(res, "critical_ratio", 0.0)
+        cu = getattr(res, "underage_cost", 0.0)
+        co = getattr(res, "overage_cost", 0.0)
+        ep = getattr(res, "expected_profit", None)
+        profit_sentence = f" Your expected seasonal profit under this policy is **${ep:,.2f}**." if ep is not None else " This minimizes expected total overage and underage costs."
+        return (
+            f"Procure **{q:,} units** for the selling season to satisfy your optimal critical fractile of **{cr * 100:.1f}%**. "
+            f"This quantity balances the underage risk of unsatisfied demand (${cu:,.2f} margin loss/unit) against the overage risk of excess inventory (${co:,.2f} markdown/unit)."
+            f"{profit_sentence}"
+        )
+    return ""
+
+
+# =============================================================================
 # STREAMLIT WEB UI IMPLEMENTATION
 # =============================================================================
 
@@ -261,77 +450,63 @@ def run_streamlit_app():
 
     agent = InventoryAgent()
 
-    # Custom styling
+    # Theme-aware custom styling (uses Streamlit theme variables, no fixed hex colors)
     st.markdown("""
         <style>
-        .main-header {
-            font-size: 2.2rem;
-            font-weight: 700;
-            color: #1E3A8A;
-            margin-bottom: 0.2rem;
-        }
-        .sub-header {
-            font-size: 1.1rem;
-            color: #4B5563;
-            margin-bottom: 1.5rem;
-        }
         .pipeline-card {
-            background-color: #F3F4F6;
+            background-color: var(--secondary-background-color);
+            color: var(--text-color);
             border-radius: 8px;
             padding: 12px;
             margin-bottom: 10px;
         }
         .metric-badge {
-            background-color: #DBEAFE;
-            color: #1E40AF;
+            background-color: var(--secondary-background-color);
+            color: var(--text-color);
             padding: 4px 10px;
             border-radius: 12px;
             font-weight: 600;
+            border: 1px solid var(--text-color);
         }
         </style>
     """, unsafe_allow_html=True)
 
-    st.markdown('<div class="main-header">📦 Supply Chain Analytics: Inventory Decision Agent</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="sub-header">Automated Decision Support System for Operations Research & Inventory Policy Optimization</div>',
-        unsafe_allow_html=True,
-    )
+    # Native Streamlit headers (theme-aware)
+    st.title("📦 Supply Chain Analytics: Inventory Decision Agent")
+    st.caption("Automated Decision Support System for Operations Research & Inventory Policy Optimization")
 
-    # Sidebar: Model Reference & Presets
+    # Session State Management for running behavior
+    if "current_question" not in st.session_state:
+        st.session_state["current_question"] = BENCHMARK_SCENARIOS[0]["question"]
+    if "latest_response" not in st.session_state:
+        st.session_state["latest_response"] = None
+    if "prev_scenario" not in st.session_state:
+        st.session_state["prev_scenario"] = "(Custom Question)"
+
+    # Sidebar: Ordered as Benchmark Scenarios, Data Upload, Supported Models, Architecture Pipeline
     with st.sidebar:
         st.header("⚙️ Agent Controls")
-        st.markdown("**Architecture Pipeline:**")
-        st.markdown("""
-        1. 🔍 **Identify Model**
-        2. 📥 **Extract Inputs**
-        3. 🐍 **Select Python Tool**
-        4. 🧮 **Calculate**
-        5. 🛡️ **Verify**
-        6. 📢 **Explain**
-        """)
 
-        st.divider()
+        # 1. Benchmark Scenarios
         st.subheader("📚 Benchmark Scenarios")
         selected_scenario = st.selectbox(
             "Load a pre-configured industry question:",
             ["(Custom Question)"] + [s["name"] for s in BENCHMARK_SCENARIOS],
+            index=0,
+            key="benchmark_select",
         )
 
-        preset_text = ""
-        if selected_scenario != "(Custom Question)":
-            for s in BENCHMARK_SCENARIOS:
-                if s["name"] == selected_scenario:
-                    preset_text = s["question"]
+        benchmark_selected = False
+        if selected_scenario != st.session_state["prev_scenario"]:
+            st.session_state["prev_scenario"] = selected_scenario
+            if selected_scenario != "(Custom Question)":
+                for s in BENCHMARK_SCENARIOS:
+                    if s["name"] == selected_scenario:
+                        st.session_state["current_question"] = s["question"]
+                        benchmark_selected = True
+                        break
 
-        st.divider()
-        st.markdown("### 🛠️ Supported Inventory Models")
-        st.caption("1. **EOQ**: Wilson classic lot sizing")
-        st.caption("2. **Quantity Discount**: All-units price break analysis")
-        st.caption("3. **Safety Stock & ROP**: Continuous review (s, Q)")
-        st.caption("4. **Fixed-Period Review**: Periodic (T, S) base stock")
-        st.caption("5. **Newsvendor**: Single-period stochastic inventory")
-
-        # Section: Data Upload (Last section in sidebar)
+        # 2. Data Upload
         st.divider()
         st.header("📁 Data Upload")
         uploaded_file = st.file_uploader(
@@ -339,6 +514,28 @@ def run_streamlit_app():
             type=["csv"],
             help="Upload a CSV file containing: Product, Category, Units, Unit Cost",
         )
+
+        # 3. Supported Models (Collapsed expander)
+        st.divider()
+        with st.expander("🛠️ Supported Models", expanded=False):
+            st.markdown("""
+            1. **EOQ**: Wilson classic lot sizing
+            2. **Quantity Discount**: All-units price break analysis
+            3. **Safety Stock & ROP**: Continuous review (s, Q)
+            4. **Fixed-Period Review**: Periodic (T, S) base stock
+            5. **Newsvendor**: Single-period stochastic inventory
+            """)
+
+        # 4. Architecture Pipeline (Collapsed expander)
+        with st.expander("⚙️ Architecture Pipeline", expanded=False):
+            st.markdown("""
+            1. 🔍 **Identify Model**
+            2. 📥 **Extract Inputs**
+            3. 🐍 **Select Python Tool**
+            4. 🧮 **Calculate**
+            5. 🛡️ **Verify**
+            6. 📢 **Explain**
+            """)
 
     # Main Area
     # -------------------------------------------------------------------------
@@ -414,105 +611,179 @@ def run_streamlit_app():
             )
 
         st.markdown("---")
-    default_val = preset_text if preset_text else "Our annual demand is 10,000 units, ordering cost is $50, and holding cost is $2 per unit per year. What is our EOQ?"
+
+    # -------------------------------------------------------------------------
+    # Question Input & Trigger Controls
+    # -------------------------------------------------------------------------
     query = st.text_area(
         "Enter your natural language inventory question:",
-        value=default_val,
+        value=st.session_state["current_question"],
         height=100,
         placeholder="e.g., Annual demand is 5000, setup cost is $40, supplier price breaks are...",
+        key="query_text_area",
     )
+    st.session_state["current_question"] = query
 
     col_btn1, col_btn2 = st.columns([1, 5])
     with col_btn1:
         run_btn = st.button("🚀 Analyze & Optimize", type="primary", use_container_width=True)
 
-    if run_btn or query:
+    # Execute analysis only when requested (button click or new benchmark selected)
+    if run_btn or benchmark_selected:
         with st.spinner("Executing 6-Stage Inventory Pipeline..."):
-            resp: AgentResponse = agent.process_question(query)
+            st.session_state["latest_response"] = agent.process_question(st.session_state["current_question"])
 
-        # Pipeline status cards
+    resp: Optional[AgentResponse] = st.session_state.get("latest_response")
+
+    # -------------------------------------------------------------------------
+    # Results Display
+    # -------------------------------------------------------------------------
+    if resp is not None:
+        # Status Message 1: Unused values yellow warning banner above results
+        if resp.unused_values:
+            unused_items = []
+            for u in resp.unused_values:
+                if hasattr(u, "context") and u.context:
+                    val_repr = getattr(u, "_int_or_float", u)
+                    unused_items.append(f"{val_repr} (in '{u.context}')")
+                else:
+                    unused_items.append(str(u))
+            st.warning(f"⚠️ **Warning: these values from your question were not used in the calculation:** {escape_dollars(', '.join(unused_items))}")
+
+        # Status Message 2: Missing inputs error message (no result cards)
+        if resp.missing_inputs:
+            st.error(
+                f"⚠️ **Clarification Needed for {resp.model_name} Model**\n\n"
+                f"I identified that your question relates to **{resp.model_name}** "
+                f"(Match Strength: {resp.confidence * 100:.0f}%), but the following required parameter(s) are missing:\n\n"
+                + "\n".join([f"- **{m}**" for m in resp.missing_inputs]) + "\n\n"
+                f"Please provide these values so I can execute the exact calculation."
+            )
+            if resp.extracted_inputs:
+                with st.expander("📥 Parameters Extracted So Far", expanded=True):
+                    st.json(resp.extracted_inputs)
+            return
+
+        # Status Message 3: Unsupported model info message (no result cards)
+        if resp.model_name in ("unsupported", InventoryAgent.MODEL_UNSUPPORTED):
+            st.info(
+                "❓ **Unsupported Question**\n\n"
+                "I could not match your question to any of the 5 supported inventory decision models. "
+                "The supported inventory models are:\n\n"
+                "1. **Economic Order Quantity (EOQ)**: Classical Wilson lot-sizing for constant demand under ordering/setup and holding cost trade-offs.\n"
+                "2. **Quantity Discount**: All-units price-break analysis evaluating feasible batch sizes and total annual acquisition and inventory costs.\n"
+                "3. **Safety Stock and Reorder Point (ROP)**: Continuous review (s, Q) replenishment policy under demand and/or lead-time variability.\n"
+                "4. **Fixed-Period Review**: Periodic review (T, S) order-up-to base-stock replenishment policy for fixed review intervals.\n"
+                "5. **Newsvendor**: Single-period stochastic inventory optimization for seasonal or perishable products with underage and overage risks.\n\n"
+                "Please rephrase your question using relevant parameters from one of these models."
+            )
+            return
+
+        # Pipeline status cards (Match Strength renamed with tooltip)
         st.subheader("🔍 Execution Pipeline Inspection")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.metric("Identified Model", resp.model_name)
         with c2:
-            st.metric("Classification Confidence", f"{resp.confidence * 100:.0f}%")
+            st.metric(
+                "Match Strength",
+                f"{resp.confidence * 100:.0f}%",
+                help="How strongly the wording matched this model's keywords. Not a probability.",
+            )
         with c3:
             st.metric("Python Tool", resp.tool_name)
         with c4:
             status_label = "✅ Verified" if resp.verification.passed else "⚠️ Attention"
             st.metric("Verification", status_label)
 
-        # Tabbed details: Decision Memo, 8-Step Student Verification, Sanity Checks, Parameters
-        tab_memo, tab_student, tab_verif, tab_inputs = st.tabs([
-            "📋 Full Decision Memo",
-            "🎓 8-Step Student Verification",
-            "🛡️ Mathematical Sanity Checks",
-            "📥 Extracted Parameters & Intermediates",
+        # Four distinct tabs without duplication
+        tab_summary, tab_student, tab_checks, tab_inputs = st.tabs([
+            "Summary",
+            "Step-by-Step Verification",
+            "Checks",
+            "Inputs",
         ])
 
-        with tab_memo:
-            st.markdown(resp.explanation)
+        with tab_summary:
+            # Answer first: Key results as large metric cards
+            st.subheader("🎯 Key Decision Results")
+            metric_cards = get_model_metric_cards(resp)
+            if metric_cards:
+                mc_cols = st.columns(len(metric_cards))
+                for idx, (lbl, val) in enumerate(metric_cards):
+                    with mc_cols[idx]:
+                        st.metric(lbl, escape_dollars(val))
+
+            # Two or three sentence plain-language recommendation
+            st.markdown("### 💡 Plain-Language Recommendation")
+            recommendation = get_plain_language_recommendation(resp)
+            st.info(escape_dollars(recommendation))
+
+            # One chart per model in Summary tab built from calculation tool values
+            chart_tuple = build_model_chart(resp)
+            if chart_tuple is not None:
+                chart_obj, chart_caption, opt_table_df = chart_tuple
+                st.markdown("### 📈 Visual Decision Analysis")
+                st.altair_chart(chart_obj, use_container_width=True, theme="streamlit")
+                st.caption(escape_dollars(chart_caption))
+                if opt_table_df is not None:
+                    st.markdown("#### 📋 Price Break Tier Comparison Table")
+                    st.dataframe(opt_table_df, use_container_width=True)
+
+            # Download report button: downloads full report as Markdown named after model and date
+            st.markdown("---")
+            model_slug = resp.model_name.lower().replace(" ", "_").replace("/", "_")
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            report_filename = f"{model_slug}_report_{date_str}.md"
+            st.download_button(
+                label="📥 Download Report",
+                data=resp.explanation,
+                file_name=report_filename,
+                mime="text/markdown",
+                use_container_width=False,
+                key="download_report_btn",
+            )
 
         with tab_student:
-            st.markdown("## 🎓 Step-by-Step Student Verification Engine")
+            st.markdown("## 🎓 Step-by-Step Verification")
             st.caption("All calculation steps below originate deterministically from Python operations research tools.")
+            report_lines = agent._format_verification_report(resp.model_name, resp.calculation_result, resp.verification)
+            report_md = "\n".join(report_lines)
+            st.markdown(escape_dollars(report_md))
 
-            # 1. Inputs Extracted
-            st.markdown("### 1. Inputs Extracted")
-            st.json(resp.inputs_extracted)
+        with tab_checks:
+            st.subheader("🛡️ Verification Checks & Mathematical Validation")
+            checks_list = getattr(resp.calculation_result, "verification_checks", []) or resp.verification.checks
+            for chk in checks_list:
+                chk_str = escape_dollars(str(chk))
+                if "FAIL" in str(chk):
+                    st.error(f"❌ {chk_str}")
+                else:
+                    st.success(f"✅ {chk_str}")
 
-            # 2. Variable Definitions
-            st.markdown("### 2. Variable Definitions")
-            for var, defn in resp.variable_definitions.items():
-                st.markdown(f"- **`{var}`**: {defn}")
-
-            # 3. Formula
-            st.markdown("### 3. Formula")
-            for fname, fexpr in resp.formula.items():
-                st.markdown(f"- **{fname.replace('_', ' ').title()}**: `{fexpr}`")
-
-            # 4. Formula with Substituted Values
-            st.markdown("### 4. Formula with Substituted Values")
-            for sname, sexpr in resp.formula_with_substituted_values.items():
-                st.info(f"**{sname.replace('_', ' ').title()}**:\n\n{sexpr}")
-
-            # 5. Intermediate Calculations
-            st.markdown("### 5. Intermediate Calculations")
-            st.json(resp.intermediate_calculations)
-
-            # 6. Final Answer
-            st.markdown("### 6. Final Answer")
-            st.success(f"**Final Answer Output**: `{resp.final_answer}`")
-
-            # 7. Verification Checks
-            st.markdown("### 7. Verification Checks")
-            for chk in resp.verification_checks:
-                st.markdown(f"- [x] {chk}")
-
-            # 8. Assumptions
-            st.markdown("### 8. Assumptions")
-            for idx, asm in enumerate(resp.assumptions, start=1):
-                st.markdown(f"{idx}. {asm}")
-
-        with tab_verif:
-            st.markdown("### Validation and Mathematical Sanity Checks")
-            if resp.verification.checks:
-                for chk in resp.verification.checks:
-                    st.success(f"✔ {chk}")
             if resp.verification.notes:
+                st.markdown("### ℹ️ Analytical Notes")
                 for note in resp.verification.notes:
-                    st.warning(f"ℹ️ {note}")
+                    st.info(escape_dollars(str(note)))
+
+            st.markdown("### 📋 Model Assumptions")
+            for idx, asm in enumerate(resp.assumptions, start=1):
+                st.markdown(f"{idx}. {escape_dollars(str(asm))}")
 
         with tab_inputs:
-            st.markdown("### Model Input Extraction & Intermediates")
-            st.json({
-                "inputs_extracted": resp.inputs_extracted,
-                "intermediate_calculations": resp.intermediate_calculations,
-                "final_answer": resp.final_answer,
-            })
-            if resp.missing_inputs:
-                st.error(f"Missing parameters required for full execution: {resp.missing_inputs}")
+            st.subheader("📥 Extracted Parameters")
+            st.json(resp.inputs_extracted)
+
+            if resp.variable_definitions:
+                st.markdown("### 📖 Variable Definitions")
+                for var, defn in resp.variable_definitions.items():
+                    st.markdown(f"- **`{var}`**: {escape_dollars(defn)}")
+
+            conv_notes = [n for n in getattr(resp.verification, "notes", []) if "converted" in str(n).lower() or "risk" in str(n).lower()]
+            if conv_notes:
+                st.markdown("### 🔄 Parameter / Time-Unit Conversions")
+                for cn in conv_notes:
+                    st.info(escape_dollars(cn))
 
 
 # =============================================================================

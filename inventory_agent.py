@@ -1849,12 +1849,12 @@ class InventoryAgent:
         if model_name == self.MODEL_EOQ:
             lines.append("| Intermediate Step / Component | Deterministic Tool Result | Economic / Mathematical Role |")
             lines.append("| :--- | :--- | :--- |")
-            lines.append(f"| Numerator ($2DS$) | {intermediates.get('numerator_2DS', 0):,.2f} | Scaled setup demand driver |")
-            lines.append(f"| Ratio ($2DS / H$) | {intermediates.get('ratio_2DS_over_H', 0):,.2f} | Squared optimal batch scale |")
-            lines.append(f"| Square Root Result ($Q^*$) | {intermediates.get('sqrt_result', 0):,.4f} units | Exact continuous minimum of TIC |")
+            lines.append(f"| Numerator (2DS) | {intermediates.get('numerator_2DS', 0):,.2f} | Scaled setup demand driver |")
+            lines.append(f"| Ratio (2DS / H) | {intermediates.get('ratio_2DS_over_H', 0):,.2f} | Squared optimal batch scale |")
+            lines.append(f"| Square Root Result (Q*) | {intermediates.get('sqrt_result', 0):,.4f} units | Exact continuous minimum of TIC |")
             lines.append(f"| Annual Ordering Cost (AOC) | ${intermediates.get('annual_ordering_cost', 0):,.2f} | Total yearly expenditure on setups |")
             lines.append(f"| Annual Holding Cost (AHC) | ${intermediates.get('annual_holding_cost', 0):,.2f} | Total yearly carrying cost of cycle stock |")
-            lines.append(f"| Cost Difference at Optimum | ${intermediates.get('cost_difference_at_optimum', 0):,.4f} | |AOC - AHC| (exact cost balance) |")
+            lines.append(f"| Cost Difference at Optimum | ${intermediates.get('cost_difference_at_optimum', 0):,.4f} | Zero at the optimum, where ordering cost equals holding cost |")
             lines.append(f"| Total Annual Inventory Cost (TIC) | ${intermediates.get('annual_inventory_cost', 0):,.2f} | Minimum total inventory management cost |")
             if intermediates.get("annual_purchase_cost") is not None:
                 lines.append(f"| Annual Purchase Cost (D × C) | ${intermediates.get('annual_purchase_cost', 0):,.2f} | Baseline acquisition expenditure |")
@@ -1950,13 +1950,13 @@ class InventoryAgent:
             if intermediates.get("cumulative_probability_table") is not None:
                 lines.append("")
                 lines.append("##### Discrete Demand & Cumulative Distribution Table")
-                lines.append("| Demand | Probability | Cumulative Probability $P(D \\le d)$ | Condition: $P(D \\le d) \\ge CR$ |")
+                lines.append("| Demand | Probability | Cumulative Probability P(D ≤ d) | Condition: P(D ≤ d) ≥ CR |")
                 lines.append("| :--- | :--- | :--- | :--- |")
                 for row in intermediates.get("cumulative_probability_table", []):
                     d_val = row.get("demand")
                     p_val = row.get("probability")
                     cp_val = row.get("cumulative_probability")
-                    sat = "✅ Smallest $P \\ge CR$ (Optimal $Q^*$)" if row.get("demand") == result.recommended_order_quantity else ("Yes" if cp_val >= result.critical_ratio else "No")
+                    sat = "✅ Smallest P ≥ CR (Optimal Q*)" if row.get("demand") == result.recommended_order_quantity else ("Yes" if cp_val >= result.critical_ratio else "No")
                     lines.append(f"| {d_val:,} | {p_val*100:.1f}% | {cp_val:.4f} ({cp_val*100:.2f}%) | {sat} |")
         lines.append("")
 
@@ -1966,38 +1966,38 @@ class InventoryAgent:
         lines.append("### 6. Final Answer")
         if model_name == self.MODEL_EOQ:
             r = result
-            lines.append(f"> **Optimal Economic Order Quantity (Q*)**: **{r.rounded_order_quantity:,} units** ({r.optimal_order_quantity:,.2f} exact)")
-            lines.append(f"> **Total Annual Inventory Cost**: **${r.annual_inventory_cost:,.2f}**")
+            lines.append(f"> **Optimal Economic Order Quantity (Q\\*)**: **{r.rounded_order_quantity:,} units** ({r.optimal_order_quantity:,.2f} exact)  ")
+            lines.append(f"> **Total Annual Inventory Cost**: **${r.annual_inventory_cost:,.2f}**  ")
             cadence_str = f" (approx. every **{r.cycle_time_days:.1f} work days**)" if r.cycle_time_days is not None else f" (**{r.cycle_time_months:.2f} months** between orders)"
-            lines.append(f"> **Replenishment Frequency**: **{r.orders_per_year:.2f} orders per year**{cadence_str}")
+            lines.append(f"> **Replenishment Frequency**: **{r.orders_per_year:.2f} orders per year**{cadence_str}  ")
         elif model_name == self.MODEL_QUANTITY_DISCOUNT:
             qd = result
-            lines.append(f"> **Optimal Order Quantity**: **{qd.rounded_optimal_quantity:,} units** (Qualifies for Tier {qd.optimal_tier_index + 1})")
-            lines.append(f"> **Unit Purchase Price**: **${qd.optimal_unit_price:,.2f}** per unit")
-            lines.append(f"> **Minimum Total Annual Cost**: **${qd.min_total_annual_cost:,.2f}**")
+            lines.append(f"> **Optimal Order Quantity**: **{qd.rounded_optimal_quantity:,} units** (Qualifies for Tier {qd.optimal_tier_index + 1})  ")
+            lines.append(f"> **Unit Purchase Price**: **${qd.optimal_unit_price:,.2f}** per unit  ")
+            lines.append(f"> **Minimum Total Annual Cost**: **${qd.min_total_annual_cost:,.2f}**  ")
             if qd.annual_savings > 0:
-                lines.append(f"> **Net Annual Savings vs Baseline**: **${qd.annual_savings:,.2f}** ({qd.percentage_savings:.2f}% reduction)")
+                lines.append(f"> **Net Annual Savings vs Baseline**: **${qd.annual_savings:,.2f}** ({qd.percentage_savings:.2f}% reduction)  ")
             else:
-                lines.append("> **Baseline Policy Optimal**: Tier 1 baseline minimizes total annual costs.")
+                lines.append("> **Baseline Policy Optimal**: Tier 1 baseline minimizes total annual costs.  ")
         elif model_name == self.MODEL_SAFETY_STOCK_ROP:
             ss = result
-            lines.append(f"> **Reorder Point (ROP)**: **{ss.rounded_reorder_point:,} units** ({ss.reorder_point:,.2f} exact)")
-            lines.append(f"> **Safety Stock (SS)**: **{ss.rounded_safety_stock:,} units** ({ss.safety_stock:,.2f} exact)")
-            lines.append(f"> **Replenishment Decision Rule**: Trigger a replenishment order whenever inventory drops to or below **{ss.rounded_reorder_point:,} units**.")
+            lines.append(f"> **Reorder Point (ROP)**: **{ss.rounded_reorder_point:,} units** ({ss.reorder_point:,.2f} exact)  ")
+            lines.append(f"> **Safety Stock (SS)**: **{ss.rounded_safety_stock:,} units** ({ss.safety_stock:,.2f} exact)  ")
+            lines.append(f"> **Replenishment Decision Rule**: Trigger a replenishment order whenever inventory drops to or below **{ss.rounded_reorder_point:,} units**.  ")
         elif model_name == self.MODEL_FIXED_PERIOD_REVIEW:
             fp = result
-            lines.append(f"> **Recommended Order Quantity (q)**: **{fp.rounded_order_quantity:,} units** ({fp.order_quantity:,.2f} exact)")
-            lines.append(f"> **Order-Up-To Level (Target Inventory S)**: **{fp.rounded_target_inventory:,} units** ({fp.target_inventory:,.2f} exact)")
-            lines.append(f"> **Safety Stock Buffer**: **{fp.rounded_safety_stock:,} units** ({fp.safety_stock:,.2f} exact)")
-            lines.append(f"> **Periodic Policy Rule**: At every {fp.review_period}-{fp.time_unit} review interval, order `q = max(0, {fp.rounded_target_inventory:,} - IP)` to bring inventory position back to {fp.rounded_target_inventory:,} units.")
+            lines.append(f"> **Recommended Order Quantity (q)**: **{fp.rounded_order_quantity:,} units** ({fp.order_quantity:,.2f} exact)  ")
+            lines.append(f"> **Order-Up-To Level (Target Inventory S)**: **{fp.rounded_target_inventory:,} units** ({fp.target_inventory:,.2f} exact)  ")
+            lines.append(f"> **Safety Stock Buffer**: **{fp.rounded_safety_stock:,} units** ({fp.safety_stock:,.2f} exact)  ")
+            lines.append(f"> **Periodic Policy Rule**: At every {fp.review_period}-{fp.time_unit} review interval, order `q = max(0, {fp.rounded_target_inventory:,} - IP)` to bring inventory position back to {fp.rounded_target_inventory:,} units.  ")
         elif model_name == self.MODEL_NEWSVENDOR:
             nv = result
-            lines.append(f"> **Optimal Order Quantity (Q*)**: **{nv.rounded_order_quantity:,} units** ({nv.optimal_order_quantity:,.2f} exact)")
-            lines.append(f"> **Target In-Stock Probability (Critical Ratio)**: **{nv.critical_ratio*100:.2f}%**")
+            lines.append(f"> **Optimal Order Quantity (Q\\*)**: **{nv.rounded_order_quantity:,} units** ({nv.optimal_order_quantity:,.2f} exact)  ")
+            lines.append(f"> **Target In-Stock Probability (Critical Ratio)**: **{nv.critical_ratio*100:.2f}%**  ")
             if nv.expected_profit is not None:
-                lines.append(f"> **Expected Seasonal Profit**: **${nv.expected_profit:,.2f}**")
+                lines.append(f"> **Expected Seasonal Profit**: **${nv.expected_profit:,.2f}**  ")
             if nv.expected_value_of_perfect_information is not None:
-                lines.append(f"> **Expected Value of Perfect Information (EVPI)**: **${nv.expected_value_of_perfect_information:,.2f}**")
+                lines.append(f"> **Expected Value of Perfect Information (EVPI)**: **${nv.expected_value_of_perfect_information:,.2f}**  ")
         lines.append("")
 
         # -------------------------------------------------------------
@@ -2137,7 +2137,7 @@ class InventoryAgent:
             r: it.EOQResult = result
             lines.append("## 📦 Economic Order Quantity (EOQ) Analysis\n")
             lines.append("### 🎯 Executive Decision Summary")
-            lines.append(f"- **Recommended Order Quantity (Q*)**: **{r.rounded_eoq:,} units** ({r.eoq:,.2f} exact)")
+            lines.append(f"- **Recommended Order Quantity (Q\\*)**: **{r.rounded_eoq:,} units** ({r.eoq:,.2f} exact)")
             cadence_str = f" (approx. every **{r.cycle_time_days:.1f} work days**)" if r.cycle_time_days is not None else f" (**{r.cycle_time_months:.2f} months** between orders)"
             lines.append(f"- **Order Frequency**: **{r.orders_per_year:.2f} orders per year**{cadence_str}")
             lines.append(f"- **Average Cycle Inventory**: **{r.average_cycle_inventory:,.1f} units**")
@@ -2175,7 +2175,7 @@ class InventoryAgent:
             nv: it.NewsvendorResult = result
             lines.append("## 📰 Newsvendor (Single-Period Stochastic) Analysis\n")
             lines.append("### 🎯 Executive Decision Summary")
-            lines.append(f"- **Optimal Order Quantity (Q*)**: **{nv.rounded_optimal_quantity:,} units** ({nv.optimal_order_quantity:,.2f} exact)")
+            lines.append(f"- **Optimal Order Quantity (Q\\*)**: **{nv.rounded_optimal_quantity:,} units** ({nv.optimal_order_quantity:,.2f} exact)")
             lines.append(f"- **Critical Ratio (Fractile)**: **{nv.critical_ratio*100:.2f}%** (Target In-Stock Probability)")
             if nv.expected_profit is not None:
                 lines.append(f"- **Expected Profit**: **${nv.expected_profit:,.2f}**\n")
@@ -2188,31 +2188,31 @@ class InventoryAgent:
         # Strategic Supply Chain Insights
         lines.append("### 💡 Strategic Supply Chain Insights")
         if model_name == self.MODEL_EOQ:
-            lines.append("- **Cost Flatness**: The total cost curve is relatively flat around $Q^*$. A 10% deviation in batch size increases total inventory costs by less than 0.5%.")
-            lines.append("- **Setup Reduction**: Reducing setup cost $S$ via EDI or automated replenishment directly lowers $Q^*$, shortening cycle inventory and working capital needs.")
+            lines.append("- **Cost Flatness**: The total cost curve is relatively flat around Q*. A 10% deviation in batch size increases total inventory costs by less than 0.5%.")
+            lines.append("- **Setup Reduction**: Reducing setup cost S via EDI or automated replenishment directly lowers Q*, shortening cycle inventory and working capital needs.")
         elif model_name == self.MODEL_QUANTITY_DISCOUNT:
             opt = result.tier_evaluations[result.optimal_tier_index]
             if opt.is_price_break_bumped:
                 lines.append(f"- Order quantity was intentionally bumped to **{int(opt.min_qty):,} units** to qualify for the ${opt.unit_price:.2f} price break.")
-                lines.append(f"- Annual purchasing savings ($D \\times \\Delta C$) outweigh the extra inventory holding costs incurred by holding higher cycle stock.")
+                lines.append(f"- Annual purchasing savings (D × ΔC) outweigh the extra inventory holding costs incurred by holding higher cycle stock.")
             else:
                 lines.append("- The unconstrained EOQ naturally falls within the winning tier range without requiring artificial batch bumping.")
         elif model_name == self.MODEL_SAFETY_STOCK_ROP:
-            lines.append("- **Lead Time Reduction**: Safety stock scales with $\\sqrt{L}$. Cutting lead time by 50% reduces safety stock by ~29.3%, freeing working capital.")
-            lines.append("- **Service Level Non-Linearity**: Increasing service level from 95% ($z=1.645$) to 99% ($z=2.326$) demands a 41.4% increase in safety stock.")
+            lines.append("- **Lead Time Reduction**: Safety stock scales with √L. Cutting lead time by 50% reduces safety stock by ~29.3%, freeing working capital.")
+            lines.append("- **Service Level Non-Linearity**: Increasing service level from 95% (z = 1.645) to 99% (z = 2.326) demands a 41.4% increase in safety stock.")
         elif model_name == self.MODEL_FIXED_PERIOD_REVIEW:
-            lines.append("- Periodic review requires holding safety stock for $(T + L)$ rather than just $L$, meaning higher holding costs in exchange for predictable ordering schedules and combined freight shipping.")
+            lines.append("- Periodic review requires holding safety stock for (T + L) rather than just L, meaning higher holding costs in exchange for predictable ordering schedules and combined freight shipping.")
         elif model_name == self.MODEL_NEWSVENDOR:
             if result.critical_ratio > 0.5:
                 if result.mean_demand is not None:
-                    lines.append(f"- High margin item ($C_u > C_o$): Ordering above mean demand ({result.optimal_order_quantity:.0f} > {result.mean_demand:.0f}) is optimal because stocking out hurts more than leftover markdown.")
+                    lines.append(f"- High margin item (Cu > Co): Ordering above mean demand ({result.optimal_order_quantity:.0f} > {result.mean_demand:.0f}) is optimal because stocking out hurts more than leftover markdown.")
                 else:
-                    lines.append(f"- High margin item ($C_u > C_o$): Target critical fractile ({result.critical_ratio*100:.1f}%) exceeds 50%, favoring ordering above median demand to protect against stockout.")
+                    lines.append(f"- High margin item (Cu > Co): Target critical fractile ({result.critical_ratio*100:.1f}%) exceeds 50%, favoring ordering above median demand to protect against stockout.")
             else:
                 if result.mean_demand is not None:
-                    lines.append(f"- Low margin / high depreciation item ($C_o > C_u$): Ordering below mean demand ({result.optimal_order_quantity:.0f} < {result.mean_demand:.0f}) is optimal to guard against severe markdown loss.")
+                    lines.append(f"- Low margin / high depreciation item (Co > Cu): Ordering below mean demand ({result.optimal_order_quantity:.0f} < {result.mean_demand:.0f}) is optimal to guard against severe markdown loss.")
                 else:
-                    lines.append(f"- Low margin / high depreciation item ($C_o > C_u$): Target critical fractile ({result.critical_ratio*100:.1f}%) is below 50%, favoring conservative ordering to protect against overstock.")
+                    lines.append(f"- Low margin / high depreciation item (Co > Cu): Target critical fractile ({result.critical_ratio*100:.1f}%) is below 50%, favoring conservative ordering to protect against overstock.")
 
         return "\n".join(lines)
 
