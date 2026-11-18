@@ -485,14 +485,18 @@ def run_streamlit_app():
             font-weight: 600;
             border: 1px solid var(--text-color);
         }
-        /* Prevent truncation in metric cards: wrap text and use smaller responsive font */
+        /* Prevent truncation in metric cards: wrap text across all metric cards */
         [data-testid="stMetricValue"], [data-testid="stMetricValue"] > div {
             white-space: normal !important;
             word-break: break-word !important;
             overflow-wrap: anywhere !important;
+            text-overflow: clip !important;
+        }
+        /* Apply smaller responsive font (1.15rem) only to the four cards in Execution Pipeline Inspection row */
+        .st-key-inspection_pipeline [data-testid="stMetricValue"],
+        .st-key-inspection_pipeline [data-testid="stMetricValue"] > div {
             font-size: 1.15rem !important;
             line-height: 1.3 !important;
-            text-overflow: clip !important;
         }
         </style>
     """, unsafe_allow_html=True)
@@ -709,21 +713,22 @@ def run_streamlit_app():
 
         # Pipeline status cards (Match Strength renamed with tooltip)
         st.subheader("🔍 Execution Pipeline Inspection")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            display_model_name = MODEL_DISPLAY_NAMES.get(resp.model_name, resp.model_name)
-            st.metric("Identified Model", display_model_name)
-        with c2:
-            st.metric(
-                "Match Strength",
-                f"{resp.confidence * 100:.0f}%",
-                help="How strongly the wording matched this model's keywords. Not a probability.",
-            )
-        with c3:
-            st.metric("Python Tool", resp.tool_name)
-        with c4:
-            status_label = "✅ Verified" if resp.verification.passed else "⚠️ Attention"
-            st.metric("Verification", status_label)
+        with st.container(key="inspection_pipeline"):
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                display_model_name = MODEL_DISPLAY_NAMES.get(resp.model_name, resp.model_name)
+                st.metric("Identified Model", display_model_name)
+            with c2:
+                st.metric(
+                    "Match Strength",
+                    f"{resp.confidence * 100:.0f}%",
+                    help="How strongly the wording matched this model's keywords. Not a probability.",
+                )
+            with c3:
+                st.metric("Python Tool", resp.tool_name)
+            with c4:
+                status_label = "✅ Verified" if resp.verification.passed else "⚠️ Attention"
+                st.metric("Verification", status_label)
 
         # Four distinct tabs without duplication
         tab_summary, tab_student, tab_checks, tab_inputs = st.tabs([

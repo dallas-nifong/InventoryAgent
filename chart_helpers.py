@@ -74,14 +74,16 @@ def get_eoq_chart_data(tool_result: Any, num_points: int = 100) -> Dict[str, Any
         plot_rows.append({"Order Quantity (units)": q, "Annual Cost ($/year)": total_cost, "Cost Component": "Total Annual Cost"})
 
     df = pd.DataFrame(plot_rows)
+    q_display = getattr(res, "rounded_eoq", getattr(res, "rounded_order_quantity", round(q_opt)))
     caption = (
         f"Total annual inventory cost is minimized where annual ordering cost equals annual holding cost at "
-        f"Q* = {round(q_opt):,} units (${min_cost:,.2f}/year)."
+        f"Q* = {q_display:,} units (${min_cost:,.2f}/year)."
     )
     return {
         "df": df,
         "curve_points": curve_points,
         "q_opt": q_opt,
+        "q_display": q_display,
         "min_cost": min_cost,
         "title": "EOQ Cost Trade-off: Ordering Cost vs. Holding Cost",
         "x_label": "Order Quantity (units)",
@@ -125,11 +127,12 @@ def build_eoq_chart(data: Dict[str, Any]) -> Any:
         )
     )
 
+    q_display = data.get("q_display", round(q_opt))
     # Point at Q*
     opt_df = pd.DataFrame([{
         "Order Quantity (units)": q_opt,
         "Annual Cost ($/year)": min_cost,
-        "Label": f"Q* = {round(q_opt):,} units (${min_cost:,.2f})",
+        "Label": f"Q* = {q_display:,} units (${min_cost:,.2f})",
     }])
 
     point = (
@@ -210,15 +213,18 @@ def get_quantity_discount_chart_data(tool_result: Any) -> Dict[str, Any]:
 
     df = pd.DataFrame(plot_rows)
     table_df = pd.DataFrame(table_rows)
+    q_display = getattr(res, "rounded_optimal_quantity", round(opt_q))
     caption = (
         f"Tier {opt_idx + 1} achieves the minimum total annual cost of ${min_tc:,.2f} "
-        f"at an evaluated order quantity of {round(opt_q):,} units."
+        f"at an evaluated order quantity of {q_display:,} units."
     )
     return {
         "df": df,
         "table_df": table_df,
         "optimal_tier_index": opt_idx,
         "optimal_tier_label": f"Tier {opt_idx + 1}",
+        "opt_q": opt_q,
+        "q_display": q_display,
         "title": "Total Annual Cost by Price Tier",
         "x_label": "Price Tier",
         "y_label": "Total Annual Cost ($/year)",
@@ -238,7 +244,7 @@ def build_quantity_discount_chart(data: Dict[str, Any]) -> Any:
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
             x=alt.X("Price Tier:N", sort=None, title=data["x_label"]),
-            y=alt.Y("Total Annual Cost ($/year):Q", title=data["y_label"]),
+            y=alt.Y("Total Annual Cost ($/year):Q", title=data["y_label"], scale=alt.Scale(nice=True, padding=25)),
             color=alt.Color(
                 "Tier Status:N",
                 scale=alt.Scale(
@@ -314,16 +320,20 @@ def get_safety_stock_chart_data(tool_result: Any, num_points: int = 150) -> Opti
         })
 
     df = pd.DataFrame(points)
+    ss_display = getattr(res, "rounded_safety_stock", round(ss))
+    rop_display = getattr(res, "rounded_reorder_point", round(rop))
     caption = (
         f"Normal distribution of lead-time demand (mean={round(mu_dl):,}, std={sigma_lt:.1f}) showing "
-        f"expected lead-time demand ({round(mu_dl):,} units), reorder point ({round(rop):,} units), and "
-        f"safety stock buffer ({round(ss):,} units) protecting the {sl * 100:.1f}% service level."
+        f"expected lead-time demand ({round(mu_dl):,} units), reorder point ({rop_display:,} units), and "
+        f"safety stock buffer ({ss_display:,} units) protecting the {sl * 100:.1f}% service level."
     )
     return {
         "df": df,
         "mu_dl": mu_dl,
         "rop": rop,
         "ss": ss,
+        "ss_display": ss_display,
+        "rop_display": rop_display,
         "sl": sl,
         "sigma_lt": sigma_lt,
         "title": "Lead-Time Demand Distribution & Safety Stock Buffer",
@@ -345,6 +355,8 @@ def build_safety_stock_chart(data: Dict[str, Any]) -> Any:
     mu_dl = data["mu_dl"]
     rop = data["rop"]
     ss = data["ss"]
+    ss_display = data.get("ss_display", round(ss))
+    rop_display = data.get("rop_display", round(rop))
 
     # Shaded density area with stockout tail highlighted
     area = (
@@ -378,12 +390,12 @@ def build_safety_stock_chart(data: Dict[str, Any]) -> Any:
     )
     text_mu = (
         alt.Chart(mu_df)
-        .mark_text(align="right", dx=-5, dy=-120, fontSize=11, fontWeight="bold", color="#1f77b4")
-        .encode(x="x:Q", text="Label:N")
+        .mark_text(align="right", dx=-6, dy=0, fontSize=11, fontWeight="bold", color="#1f77b4")
+        .encode(x="x:Q", y=alt.value(14), text="Label:N")
     )
 
     # Vertical line at Reorder Point (ROP)
-    rop_df = pd.DataFrame([{"x": rop, "Label": f"Reorder Point: {round(rop):,} units"}])
+    rop_df = pd.DataFrame([{"x": rop, "Label": f"Reorder Point: {rop_display:,} units"}])
     rule_rop = (
         alt.Chart(rop_df)
         .mark_rule(color="#d62728", strokeWidth=2.5)
@@ -391,17 +403,17 @@ def build_safety_stock_chart(data: Dict[str, Any]) -> Any:
     )
     text_rop = (
         alt.Chart(rop_df)
-        .mark_text(align="left", dx=5, dy=-120, fontSize=11, fontWeight="bold", color="#d62728")
-        .encode(x="x:Q", text="Label:N")
+        .mark_text(align="left", dx=6, dy=0, fontSize=11, fontWeight="bold", color="#d62728")
+        .encode(x="x:Q", y=alt.value(14), text="Label:N")
     )
 
     # Label for Safety Stock gap between mu_dl and rop
     gap_x = (mu_dl + rop) / 2.0
-    gap_df = pd.DataFrame([{"x": gap_x, "Label": f"Safety Stock (SS) = {round(ss):,} units"}])
+    gap_df = pd.DataFrame([{"x": gap_x, "Label": f"Safety Stock (SS) = {ss_display:,} units"}])
     text_gap = (
         alt.Chart(gap_df)
-        .mark_text(dy=-80, fontSize=11, fontWeight="bold", color="#2ca02c")
-        .encode(x="x:Q", text="Label:N")
+        .mark_text(align="center", dx=0, dy=0, fontSize=11, fontWeight="bold", color="#2ca02c")
+        .encode(x="x:Q", y=alt.value(34), text="Label:N")
     )
 
     return ((area + rule_mu + text_mu + rule_rop + text_rop + text_gap)
@@ -436,9 +448,12 @@ def get_periodic_review_chart_data(tool_result: Any) -> Dict[str, Any]:
         {"Inventory Metric": "Current Position (IP)", "Component": "Inventory Position (IP)", "Units (units)": ip},
     ]
     df = pd.DataFrame(rows)
+    q_display = getattr(res, "rounded_order_quantity", round(q))
+    target_s_display = getattr(res, "rounded_target_inventory", round(target_s))
+    ss_display = getattr(res, "rounded_safety_stock", round(ss))
     caption = (
-        f"Target inventory of {round(target_s):,} units comprises expected protection-period demand ({round(demand_prot):,} units) "
-        f"plus safety stock buffer ({round(ss):,} units); ordering {round(q):,} units raises current inventory position ({round(ip):,} units) to target stock."
+        f"Target inventory of {target_s_display:,} units comprises expected protection-period demand ({round(demand_prot):,} units) "
+        f"plus safety stock buffer ({ss_display:,} units); ordering {q_display:,} units raises current inventory position ({round(ip):,} units) to target stock."
     )
     return {
         "df": df,
@@ -447,6 +462,9 @@ def get_periodic_review_chart_data(tool_result: Any) -> Dict[str, Any]:
         "target_inventory": target_s,
         "inventory_position": ip,
         "order_quantity": q,
+        "q_display": q_display,
+        "target_s_display": target_s_display,
+        "ss_display": ss_display,
         "title": "Periodic Review Policy: Target Inventory Level vs. Current Position",
         "x_label": "Inventory Policy Metric",
         "y_label": "Inventory Units (units)",
@@ -463,15 +481,14 @@ def build_periodic_review_chart(data: Dict[str, Any]) -> Any:
         import pandas as pd
 
     df = data["df"]
-    q = data["order_quantity"]
-    target_s = data["target_inventory"]
+    q_display = data.get("q_display", round(data.get("order_quantity", 0)))
 
     bars = (
         alt.Chart(df)
         .mark_bar(width=65, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
             x=alt.X("Inventory Metric:N", sort=None, title=data["x_label"]),
-            y=alt.Y("Units (units):Q", stack="zero", title=data["y_label"]),
+            y=alt.Y("Units (units):Q", stack="zero", title=data["y_label"], scale=alt.Scale(nice=True, padding=25)),
             color=alt.Color(
                 "Component:N",
                 scale=alt.Scale(
@@ -488,18 +505,17 @@ def build_periodic_review_chart(data: Dict[str, Any]) -> Any:
         )
     )
 
-    # Text label for amount to order
+    # Text label for amount to order anchored inside the plot area
     annot_df = pd.DataFrame([{
         "Inventory Metric": "Current Position (IP)",
-        "y": target_s,
-        "Label": f"Amount to Order: q = {round(q):,} units",
+        "Label": f"Amount to Order: q = {q_display:,} units",
     }])
     text_annot = (
         alt.Chart(annot_df)
-        .mark_text(dy=-12, fontSize=11, fontWeight="bold", color="#d62728")
+        .mark_text(align="center", dy=0, fontSize=11, fontWeight="bold", color="#d62728")
         .encode(
             x="Inventory Metric:N",
-            y="y:Q",
+            y=alt.value(14),
             text="Label:N",
         )
     )
@@ -544,8 +560,9 @@ def get_newsvendor_chart_data(tool_result: Any, num_points: int = 150) -> Dict[s
                 "Status": highlight,
             })
         df = pd.DataFrame(plot_rows)
+        q_display = getattr(res, "rounded_optimal_quantity", getattr(res, "rounded_order_quantity", round(q_opt)))
         caption = (
-            f"Recommended order quantity ({round(q_opt):,} units) is the smallest demand level whose "
+            f"Recommended order quantity ({q_display:,} units) is the smallest demand level whose "
             f"cumulative probability satisfies the {cr * 100:.1f}% critical ratio."
         )
         return {
@@ -553,6 +570,7 @@ def get_newsvendor_chart_data(tool_result: Any, num_points: int = 150) -> Dict[s
             "df": df,
             "critical_ratio": cr,
             "chosen_quantity": q_opt,
+            "q_display": q_display,
             "title": "Discrete Demand Cumulative Distribution & Critical Ratio",
             "x_label": "Demand (units)",
             "y_label": "Cumulative Probability P(D ≤ d)",
@@ -580,9 +598,10 @@ def get_newsvendor_chart_data(tool_result: Any, num_points: int = 150) -> Dict[s
                 "Region": region,
             })
         df = pd.DataFrame(points)
+        q_display = getattr(res, "rounded_optimal_quantity", getattr(res, "rounded_order_quantity", round(q_opt)))
         caption = (
             f"Normal demand distribution (mean={round(mu):,}, std={sigma:.1f}) with optimal order quantity "
-            f"Q* = {round(q_opt):,} units satisfying the {cr * 100:.1f}% critical ratio fractile."
+            f"Q* = {q_display:,} units satisfying the {cr * 100:.1f}% critical ratio fractile."
         )
         return {
             "mode": "normal",
@@ -591,6 +610,7 @@ def get_newsvendor_chart_data(tool_result: Any, num_points: int = 150) -> Dict[s
             "std": sigma,
             "critical_ratio": cr,
             "q_opt": q_opt,
+            "q_display": q_display,
             "title": "Newsvendor Demand Distribution & Optimal Order Quantity",
             "x_label": "Demand (units)",
             "y_label": "Probability Density",
@@ -666,7 +686,8 @@ def build_newsvendor_chart(data: Dict[str, Any]) -> Any:
                 ],
             )
         )
-        q_df = pd.DataFrame([{"x": q_opt, "Label": f"Q* = {round(q_opt):,} units"}])
+        q_display = data.get("q_display", round(q_opt))
+        q_df = pd.DataFrame([{"x": q_opt, "Label": f"Q* = {q_display:,} units"}])
         rule_q = (
             alt.Chart(q_df)
             .mark_rule(color="#d62728", strokeWidth=2.5)
@@ -674,8 +695,8 @@ def build_newsvendor_chart(data: Dict[str, Any]) -> Any:
         )
         text_q = (
             alt.Chart(q_df)
-            .mark_text(align="left", dx=5, dy=-120, fontSize=11, fontWeight="bold", color="#d62728")
-            .encode(x="x:Q", text="Label:N")
+            .mark_text(align="left", dx=6, dy=0, fontSize=11, fontWeight="bold", color="#d62728")
+            .encode(x="x:Q", y=alt.value(14), text="Label:N")
         )
         return (area + rule_q + text_q).properties(title=data["title"], height=350).interactive()
 

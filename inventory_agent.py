@@ -302,7 +302,7 @@ class InventoryAgent:
 
         # 3. Newsvendor Cues (recognized with or without the word 'salvage')
         nv_keywords = [
-            "newsvendor", "newsboy", "single period", "salvage", "salvages",
+            "newsvendor", "newsboy", "newsstand", "newspaper", "newspapers", "single period", "salvage", "salvages",
             "perishable", "spoilage", "seasonal", "fashion item", "leftover",
             "critical ratio", "critical fractile", "underage", "overage",
             "shortage penalty", "clearance price", "scrap value", "one-time buy",
@@ -353,7 +353,7 @@ class InventoryAgent:
         )
         has_demand_dist = bool(
             re.search(
-                r"\b(?:normally\s+distributed|mean\s+of\s+[\d,]+|standard\s+deviation\s+of\s+[\d,]+|demand\s+table)\b",
+                r"\b(?:normally\s+distributed|normal\b|mean\s*(?:of\s*|=)?\s*[\d,]+|standard\s+deviation\s*(?:of\s*|=)?\s*[\d,]+|demand\s+table)\b",
                 q,
             )
         )
@@ -599,6 +599,77 @@ class InventoryAgent:
 
         return std_demand, std_lead_time, lead_time_variance, lead_time_stated_variable
 
+    def _extract_demand_info(self, q: str) -> Tuple[Optional[float], Optional[str]]:
+        """
+        Shared demand-extraction helper across all inventory decision models.
+        Extracts numerical demand value and time unit ('day', 'week', 'month', 'year')
+        from standard phrasings as well as phrasings using 'averages', 'on average',
+        'about', 'approximately', etc.
+
+        Returns:
+            Tuple of (demand_value, time_unit_or_None)
+        """
+        UNIT_WORDS = r"(?:units?|cases?|items?|box(?:es)?|cartons?|tons?|gallons?|pounds?|lbs?|pieces?|pallets?|barrels?|newspapers?|pkg|packages?|pencils?|cakes?|roses?|parkas?)"
+
+        patterns: List[Tuple[str, Optional[str]]] = [
+            # 1. Explicit Annual
+            (r"\b(?:annual|yearly)\s+demand(?:\s+for\s+(?:an?\s+)?\w+)?\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "year"),
+            (r"\b(?:annual\s+sales|annual\s+usage|annual\s+consumption)\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "year"),
+            (r"\bdemand\s+(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+year|annually|a\s+year|/year)\b", "year"),
+            (r"\b(?:we\s+)?(?:consumes?|uses?|sells?|use|sell)\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:a|per|/)\s*year(?:\s+on\s+average)?\b", "year"),
+            (r"\b(?:on\s+average\s*,?\s*)(?:we\s+)?(?:consumes?|uses?|sells?|use|sell)\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:a|per|/)\s*year\b", "year"),
+            (r"\b(?:forecasted\s+annual\s+demand|expected\s+annual\s+demand)\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "year"),
+
+            # 2. Explicit Monthly
+            (r"\bmonthly\s+demand(?:\s+for\s+(?:an?\s+)?\w+)?\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "month"),
+            (r"\bdemand\s+per\s+month\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "month"),
+            (r"\bdemand\s+(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+month|monthly|a\s+month|/month)\b", "month"),
+            (r"\b(?:we\s+)?(?:consumes?|uses?|sells?|use|sell)\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+month|monthly|a\s+month|/month)(?:\s+on\s+average)?\b", "month"),
+            (r"\b(?:on\s+average\s*,?\s*)(?:we\s+)?(?:consumes?|uses?|sells?|use|sell)\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+month|monthly|a\s+month|/month)\b", "month"),
+
+            # 3. Explicit Weekly
+            (r"\bweekly\s+demand(?:\s+for\s+(?:an?\s+)?\w+)?\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "week"),
+            (r"\bdemand\s+per\s+week\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "week"),
+            (r"\bdemand\s+(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+week|weekly|a\s+week|/week)\b", "week"),
+            (r"\b(?:we\s+)?(?:consumes?|uses?|sells?|use|sell)\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+week|weekly|a\s+week|/week)(?:\s+on\s+average)?\b", "week"),
+            (r"\b(?:on\s+average\s*,?\s*)(?:we\s+)?(?:consumes?|uses?|sells?|use|sell)\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+week|weekly|a\s+week|/week)\b", "week"),
+
+            # 4. Explicit Daily
+            (r"\bdaily\s+demand(?:\s+for\s+(?:an?\s+)?\w+)?\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "day"),
+            (r"\bdemand\s+per\s+day\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "day"),
+            (r"\baverage\s+daily\s+demand\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", "day"),
+            (r"\bdemand\s+(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+day|daily|a\s+day|/day)\b", "day"),
+            (r"\b(?:we\s+)?(?:consumes?|uses?|sells?|use|sell)\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+day|daily|a\s+day|/day)(?:\s+on\s+average)?\b", "day"),
+            (r"\b(?:on\s+average\s*,?\s*)(?:we\s+)?(?:consumes?|uses?|sells?|use|sell)\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+day|daily|a\s+day|/day)\b", "day"),
+            (r"\bmean\s+of\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*per\s+day\b", "day"),
+
+            # 5. Generic / Clause Demand
+            (r"\b(?:average\s+demand|mean\s+demand|expected\s+demand|demand\s+rate|demand\s+averages)\s*(?:averages|is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)", None),
+            (r"\bdemand\s*(?:averages|is|are|of|=|:)\s*(?!standard|std|sigma)(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\b", None),
+            (r"\bdemand\s+has\s+(?:a\s+)?mean\s+of\s*(-?[\d,]+(?:\.\d+)?)", None),
+            (r"\bsells?\s*(?:an?\s+average\s+of\s*)?(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\b", None),
+            (r"\b(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"\s*per\s+(?:day|week|month|year)\b", None),
+        ]
+
+        for pat, unit in patterns:
+            m = re.search(pat, q, re.I)
+            if m:
+                val = self._clean_number(m.group(1))
+                if val is not None:
+                    resolved_unit = unit
+                    if resolved_unit is None:
+                        if re.search(r"\b(?:day|daily)\b", q, re.I):
+                            resolved_unit = "day"
+                        elif re.search(r"\b(?:week|weekly)\b", q, re.I):
+                            resolved_unit = "week"
+                        elif re.search(r"\b(?:month|monthly)\b", q, re.I):
+                            resolved_unit = "month"
+                        elif re.search(r"\b(?:year|annual|annually|yearly)\b", q, re.I):
+                            resolved_unit = "year"
+                    return val, resolved_unit
+
+        return None, None
+
     def extract_inputs(self, question: str, model_name: str, **kwargs) -> Tuple[Dict[str, Any], List[str]]:
         """
         Extract model-specific parameters from customer natural language query.
@@ -617,20 +688,44 @@ class InventoryAgent:
         UNIT_WORDS = r"(?:units?|cases?|items?|box(?:es)?|cartons?|tons?|gallons?|pounds?|lbs?|pieces?|pallets?|barrels?|newspapers?|pkg|packages?|pencils?|cakes?|roses?)"
 
         if model_name == self.MODEL_EOQ:
-            # 1. Annual Demand (and monthly/weekly conversions)
-            # Check explicit annual demand first
-            d = self._extract_number(q, [
-                r"\b(?:annual\s+demand|yearly\s+demand|annual\s+sales|annual\s+usage|annual\s+consumption)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
-                r"\b(?:we\s+)?sell\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:a|per|/)\s*year\b",
-                r"\b(?:we\s+)?(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*(?:per\s+year|annually|a\s+year|/year)\b",
-                r"\bdemand\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+year|annually|a\s+year|/year)",
-                r"\b(?:uses?|consumption\s+is|we\s+use)\s*(-?[\d,]+(?:\.\d+)?)\s*(?:[a-z]+\s+)*(?:per\s+year|annually|a\s+year|/year)",
-                r"\b(-?[\d,]+(?:\.\d+)?)\s*(?:" + UNIT_WORDS + r")?(?:\s+of\s+\w+)?\s*(?:per\s+year|annually|a\s+year|/year)\b",
-                r"\b(?:forecasted\s+annual\s+demand|expected\s+annual\s+demand)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
-            ])
+            # 1. Annual Demand (and monthly/weekly conversions via shared helper)
+            d = None
+            d_val, d_unit = self._extract_demand_info(q)
+            if d_val is not None:
+                if d_unit == "year" or d_unit is None:
+                    d = d_val
+                elif d_unit == "month":
+                    d = d_val * 12.0
+                    inputs["monthly_demand"] = d_val
+                    inputs["annual_demand_converted_from_monthly"] = True
+                    conversion_notes.append(f"Monthly demand of {d_val:,.2f} converted to annual demand of {d:,.2f} (× 12 months/year) to match annual holding cost.")
+                elif d_unit == "week":
+                    d = d_val * 52.0
+                    inputs["weekly_demand"] = d_val
+                    inputs["annual_demand_converted_from_weekly"] = True
+                    conversion_notes.append(f"Weekly demand of {d_val:,.2f} converted to annual demand of {d:,.2f} (× 52 weeks/year) to match annual holding cost.")
+                elif d_unit == "day":
+                    work_days_tmp = self._extract_number(q, [r"\b([\d]+)\s*(?:work|business|operating)?\s*days\s*per\s*year\b"])
+                    if work_days_tmp is not None:
+                        d = d_val * float(work_days_tmp)
+                        conversion_notes.append(f"Daily demand of {d_val:,.2f} converted to annual demand of {d:,.2f} (× {int(work_days_tmp)} operating days/year).")
+                    else:
+                        missing.append("work_days_per_year (operating days per year required to convert daily demand to annual demand without guessing)")
+
+            # Check explicit annual demand fallback if not yet found
+            if d is None:
+                d = self._extract_number(q, [
+                    r"\b(?:annual\s+demand|yearly\s+demand|annual\s+sales|annual\s+usage|annual\s+consumption)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
+                    r"\b(?:we\s+)?sell\s+(?:about|approx(?:imately)?)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:a|per|/)\s*year\b",
+                    r"\b(?:we\s+)?(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*(?:per\s+year|annually|a\s+year|/year)\b",
+                    r"\bdemand\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+year|annually|a\s+year|/year)",
+                    r"\b(?:uses?|consumption\s+is|we\s+use)\s*(-?[\d,]+(?:\.\d+)?)\s*(?:[a-z]+\s+)*(?:per\s+year|annually|a\s+year|/year)",
+                    r"\b(-?[\d,]+(?:\.\d+)?)\s*(?:" + UNIT_WORDS + r")?(?:\s+of\s+\w+)?\s*(?:per\s+year|annually|a\s+year|/year)\b",
+                    r"\b(?:forecasted\s+annual\s+demand|expected\s+annual\s+demand)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
+                ])
 
             if d is None:
-                # Check monthly demand conversion
+                # Check monthly demand conversion fallback
                 d_month = self._extract_number(q, [
                     r"\b(?:monthly\s+demand|demand\s+per\s+month)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
                     r"\b(?:we\s+)?(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*(?:per\s+month|monthly|a\s+month)\b",
@@ -645,7 +740,7 @@ class InventoryAgent:
                     conversion_notes.append(f"Monthly demand of {d_month:,.2f} converted to annual demand of {d:,.2f} (× 12 months/year) to match annual holding cost.")
 
             if d is None:
-                # Check weekly demand conversion
+                # Check weekly demand conversion fallback
                 d_week = self._extract_number(q, [
                     r"\b(?:weekly\s+demand|demand\s+per\s+week)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
                     r"\b(?:we\s+)?(?:consumes?|uses?|sells?|use)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*(?:per\s+week|weekly|a\s+week)\b",
@@ -660,7 +755,7 @@ class InventoryAgent:
                     conversion_notes.append(f"Weekly demand of {d_week:,.2f} converted to annual demand of {d:,.2f} (× 52 weeks/year) to match annual holding cost.")
 
             if d is None:
-                # Check daily demand conversion
+                # Check daily demand conversion fallback
                 d_daily = self._extract_number(q, [
                     r"\b(?:daily\s+demand|demand\s+per\s+day)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
                     r"\b(?:we\s+)?(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*(?:per\s+day|daily|a\s+day)\b",
@@ -769,14 +864,29 @@ class InventoryAgent:
                 inputs["work_days_per_year"] = int(kwargs["work_days_per_year"])
 
         elif model_name == self.MODEL_QUANTITY_DISCOUNT:
-            # 1. Demand (and conversions)
-            d = self._extract_number(q, [
-                r"\b(?:annual\s+demand|yearly\s+demand|annual\s+sales)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
-                r"\b(?:we\s+)?(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*(?:per\s+year|annually|a\s+year)\b",
-                r"\b(?:uses?|consumption\s+is|we\s+use)\s*(-?[\d,]+(?:\.\d+)?)\s*(?:[a-z]+\s+)*(?:per\s+year|annually|a\s+year)",
-                r"\bsells?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+year|annually|a\s+year)?",
-                r"\b(-?[\d,]+(?:\.\d+)?)\s*(?:" + UNIT_WORDS + r")?(?:\s+of\s+\w+)?\s*(?:per\s+year|annually|a\s+year)",
-            ])
+            # 1. Demand (and conversions via shared helper)
+            d = None
+            d_val, d_unit = self._extract_demand_info(q)
+            if d_val is not None:
+                if d_unit == "year" or d_unit is None:
+                    d = d_val
+                elif d_unit == "month":
+                    d = d_val * 12.0
+                    inputs["monthly_demand"] = d_val
+                    conversion_notes.append(f"Monthly demand of {d_val:,.2f} converted to annual demand of {d:,.2f} (× 12 months/year).")
+                elif d_unit == "week":
+                    d = d_val * 52.0
+                    inputs["weekly_demand"] = d_val
+                    conversion_notes.append(f"Weekly demand of {d_val:,.2f} converted to annual demand of {d:,.2f} (× 52 weeks/year).")
+
+            if d is None:
+                d = self._extract_number(q, [
+                    r"\b(?:annual\s+demand|yearly\s+demand|annual\s+sales)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
+                    r"\b(?:we\s+)?(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*(?:per\s+year|annually|a\s+year)\b",
+                    r"\b(?:uses?|consumption\s+is|we\s+use)\s*(-?[\d,]+(?:\.\d+)?)\s*(?:[a-z]+\s+)*(?:per\s+year|annually|a\s+year)",
+                    r"\bsells?\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*(?:per\s+year|annually|a\s+year)?",
+                    r"\b(-?[\d,]+(?:\.\d+)?)\s*(?:" + UNIT_WORDS + r")?(?:\s+of\s+\w+)?\s*(?:per\s+year|annually|a\s+year)",
+                ])
 
             if d is None:
                 # Check monthly conversion
@@ -1139,16 +1249,22 @@ class InventoryAgent:
 
             # 3. Average Demand (if figures during lead time not given)
             if "lead_time_demand_mean" not in inputs:
-                d = self._extract_number(q, [
-                    r"\b(?:average\s+demand|mean\s+demand|expected\s+demand|daily\s+demand|weekly\s+demand|average\s+daily\s+demand|average\s+weekly\s+demand|demand\s+rate|demand\s+averages)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
-                    r"\b(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*per\s+(?:day|week|month)\b",
-                    r"\b(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*a\s+(?:day|week|month)\b",
-                    r"\bdemand\s+has\s+(?:a\s+)?mean\s+of\s*(-?[\d,]+(?:\.\d+)?)",
-                    r"\bmean\s+of\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*per\s+(?:day|week|month)",
-                    r"\bdemand\s*(?:is|are|of|=|:)?\s*(?!standard|std|sigma)(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*per\s+(?:day|week|month)\b",
-                    r"\bsells?\s*(?:an?\s+average\s+of\s*)?(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*per\s+(?:day|week|month)\b",
-                    r"\b(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"\s*per\s+(?:day|week|month)\b",
-                ])
+                d_val, d_unit = self._extract_demand_info(q)
+                if d_val is not None:
+                    d = d_val
+                    if demand_unit is None and d_unit:
+                        demand_unit = d_unit
+                else:
+                    d = self._extract_number(q, [
+                        r"\b(?:average\s+demand|mean\s+demand|expected\s+demand|daily\s+demand|weekly\s+demand|average\s+daily\s+demand|average\s+weekly\s+demand|demand\s+rate|demand\s+averages)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
+                        r"\b(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*per\s+(?:day|week|month)\b",
+                        r"\b(?:consumes?|uses?|sells?)\s+(-?[\d,]+(?:\.\d+)?)\s*(?:[a-zA-Z]+)?\s*a\s+(?:day|week|month)\b",
+                        r"\bdemand\s+has\s+(?:a\s+)?mean\s+of\s*(-?[\d,]+(?:\.\d+)?)",
+                        r"\bmean\s+of\s*(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*per\s+(?:day|week|month)",
+                        r"\bdemand\s*(?:is|are|of|=|:)?\s*(?!standard|std|sigma)(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*per\s+(?:day|week|month)\b",
+                        r"\bsells?\s*(?:an?\s+average\s+of\s*)?(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"?\s*per\s+(?:day|week|month)\b",
+                        r"\b(-?[\d,]+(?:\.\d+)?)\s*" + UNIT_WORDS + r"\s*per\s+(?:day|week|month)\b",
+                    ])
                 if d is not None:
                     inputs["demand_per_period"] = d
                     inputs["avg_demand"] = d
@@ -1213,10 +1329,14 @@ class InventoryAgent:
             ])
 
             # 3. Demand Rate d
-            d = self._extract_number(q, [
-                r"\b(?:average\s+daily\s+demand|daily\s+demand|average\s+demand|mean\s+demand|weekly\s+demand|demand\s+rate)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
-                r"\bdemand\s*(?:is|are|of|=|:)?\s*(?!standard|std|sigma)(-?[\d,]+(?:\.\d+)?)\b",
-            ])
+            d_val, d_unit = self._extract_demand_info(q)
+            if d_val is not None:
+                d = d_val
+            else:
+                d = self._extract_number(q, [
+                    r"\b(?:average\s+daily\s+demand|daily\s+demand|average\s+demand|mean\s+demand|weekly\s+demand|demand\s+rate)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
+                    r"\bdemand\s*(?:is|are|of|=|:)?\s*(?!standard|std|sigma)(-?[\d,]+(?:\.\d+)?)\b",
+                ])
 
             # 4. Demand Standard Deviation
             std_d = self._extract_number(q, [
@@ -1226,6 +1346,8 @@ class InventoryAgent:
 
             # Time units
             demand_unit = "day" if re.search(r"\b(?:day|daily)\b", q, re.I) else ("week" if re.search(r"\b(?:week|weekly)\b", q, re.I) else "period")
+            if d_unit in ("day", "week", "month"):
+                demand_unit = d_unit
 
             t_unit = "day"
             t_m = re.search(r"\bevery\s*(-?[\d,]+(?:\.\d+)?)\s*(days?|weeks?|months?)", q, re.I)
@@ -1404,7 +1526,7 @@ class InventoryAgent:
             c = self._extract_number(q, [
                 r"\b(?:each\s+" + UNIT_WORDS + r"?\s+)?costs?\s*\$?\s*(-?[\d,]+(?:\.\d+)?)\s+to\s+(?:purchase|buy|make|produce)\b",
                 r"\b(?:purchase\s+cost|wholesale\s+price|procurement\s+cost|acquisition\s+cost|unit\s+purchase\s+price|unit\s+cost|cost\s+to\s+buy)\s*(?:is|are|of|=|:)?\s*\$?\s*(-?[\d,]+(?:\.\d+)?)",
-                r"(?<!to\s)\b(?:buys?|purchases?)\s+(?:[a-zA-Z]+\s+){0,3}(?:for|at)\s*\$?\s*(-?[\d,]+(?:\.\d+)?)(?!\s*and\s+sells)",
+                r"(?<!to\s)\b(?:buys?|purchases?)\s+(?:[a-zA-Z]+\s+){0,3}(?:for|at)\s*\$?\s*(-?[\d,]+(?:\.\d+)?)\b",
                 r"\bcosts?\s*\$?\s*(-?[\d,]+(?:\.\d+)?)\s+to\s+(?:make|produce|manufacture|buy)\b",
                 r"(?<!underage\s)(?<!overage\s)(?<!shortage\s)(?<!excess\s)\bcosts?\s*(?:is|are|of|=|:)?\s*\$?\s*(-?[\d,]+(?:\.\d+)?)\b",
             ])
@@ -1431,6 +1553,10 @@ class InventoryAgent:
                 r"\bdemand\s+(?:follows\s+(?:a\s+)?normal\s+distribution\s+with\s+)?mean\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
                 r"\bmean\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
             ])
+            if mu is None:
+                d_val, _ = self._extract_demand_info(q)
+                if d_val is not None:
+                    mu = d_val
 
             # 8. Demand Standard Deviation
             sigma = self._extract_number(q, [
@@ -1465,7 +1591,7 @@ class InventoryAgent:
 
             has_explicit_no_salvage = bool(
                 re.search(
-                    r"\b(?:no\s+(?:salvage|scrap|liquidation)|zero\s+(?:salvage|scrap|liquidation)|salvage\s*(?:value\s*)?(?:is|of|=|:)?\s*0|worthless|without\s+salvage|donated|discarded|thrown\s+away|composted)\b",
+                    r"\b(?:no\s+(?:salvage|scrap|liquidation|resale\s+value)|zero\s+(?:salvage|scrap|liquidation)|salvage\s*(?:value\s*)?(?:is|of|=|:)?\s*0|worthless|without\s+salvage|donated|discarded|thrown\s+away|composted|(?:have|has)\s+no\s+(?:recoverable\s+)?value|(?:cannot|can't)\s+be\s+(?:returned\s+or\s+resold|resold\s+or\s+returned|resold|returned)|no\s+resale\s+value)\b",
                     q,
                     re.I,
                 )
