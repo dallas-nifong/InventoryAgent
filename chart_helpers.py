@@ -239,11 +239,12 @@ def build_quantity_discount_chart(data: Dict[str, Any]) -> Any:
         import altair as alt
 
     df = data["df"]
+    x_axis = alt.Axis(labelAngle=0, labelLimit=0)
     bars = (
         alt.Chart(df)
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
-            x=alt.X("Price Tier:N", sort=None, title=data["x_label"]),
+            x=alt.X("Price Tier:N", sort=None, title=data["x_label"], axis=x_axis),
             y=alt.Y("Total Annual Cost ($/year):Q", title=data["y_label"], scale=alt.Scale(nice=True, padding=25)),
             color=alt.Color(
                 "Tier Status:N",
@@ -267,7 +268,7 @@ def build_quantity_discount_chart(data: Dict[str, Any]) -> Any:
         alt.Chart(df)
         .mark_text(dy=-10, fontSize=11, fontWeight="bold", color="#1f77b4")
         .encode(
-            x=alt.X("Price Tier:N", sort=None),
+            x=alt.X("Price Tier:N", sort=None, axis=x_axis),
             y=alt.Y("Total Annual Cost ($/year):Q"),
             text=alt.Text("Total Annual Cost ($/year):Q", format="$,.0f"),
         )
@@ -358,13 +359,15 @@ def build_safety_stock_chart(data: Dict[str, Any]) -> Any:
     ss_display = data.get("ss_display", round(ss))
     rop_display = data.get("rop_display", round(rop))
 
-    # Shaded density area with stockout tail highlighted
+    # Shaded density area with stockout tail highlighted and headroom on y scale
+    max_density = float(df["Probability Density"].max()) if not df.empty else 1.0
+    y_scale = alt.Scale(domain=[0, max_density * 1.35], zero=True)
     area = (
         alt.Chart(df)
         .mark_area(opacity=0.6)
         .encode(
             x=alt.X("Lead-Time Demand (units):Q", title=data["x_label"]),
-            y=alt.Y("Probability Density:Q", title=data["y_label"]),
+            y=alt.Y("Probability Density:Q", title=data["y_label"], scale=y_scale),
             color=alt.Color(
                 "Region:N",
                 scale=alt.Scale(
@@ -482,13 +485,16 @@ def build_periodic_review_chart(data: Dict[str, Any]) -> Any:
 
     df = data["df"]
     q_display = data.get("q_display", round(data.get("order_quantity", 0)))
+    max_val = max(float(data.get("target_inventory", 0.0)), float(data.get("inventory_position", 0.0)))
+    y_max = max(1.0, max_val) * 1.25
+    x_axis = alt.Axis(labelAngle=0, labelLimit=0)
 
     bars = (
         alt.Chart(df)
         .mark_bar(width=65, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
-            x=alt.X("Inventory Metric:N", sort=None, title=data["x_label"]),
-            y=alt.Y("Units (units):Q", stack="zero", title=data["y_label"], scale=alt.Scale(nice=True, padding=25)),
+            x=alt.X("Inventory Metric:N", sort=None, title=data["x_label"], axis=x_axis),
+            y=alt.Y("Units (units):Q", stack="zero", title=data["y_label"], scale=alt.Scale(domain=[0, y_max], zero=True, nice=True)),
             color=alt.Color(
                 "Component:N",
                 scale=alt.Scale(
@@ -505,16 +511,16 @@ def build_periodic_review_chart(data: Dict[str, Any]) -> Any:
         )
     )
 
-    # Text label for amount to order anchored inside the plot area
+    # Text label for amount to order placed directly above the Target Inventory bar, inside plot
     annot_df = pd.DataFrame([{
-        "Inventory Metric": "Current Position (IP)",
+        "Inventory Metric": "Target Inventory (S)",
         "Label": f"Amount to Order: q = {q_display:,} units",
     }])
     text_annot = (
         alt.Chart(annot_df)
         .mark_text(align="center", dy=0, fontSize=11, fontWeight="bold", color="#d62728")
         .encode(
-            x="Inventory Metric:N",
+            x=alt.X("Inventory Metric:N", axis=x_axis),
             y=alt.value(14),
             text="Label:N",
         )
@@ -666,12 +672,14 @@ def build_newsvendor_chart(data: Dict[str, Any]) -> Any:
     else:
         df = data["df"]
         q_opt = data["q_opt"]
+        max_density = float(df["Probability Density"].max()) if not df.empty else 1.0
+        y_scale = alt.Scale(domain=[0, max_density * 1.35], zero=True)
         area = (
             alt.Chart(df)
             .mark_area(opacity=0.6)
             .encode(
                 x=alt.X("Demand (units):Q", title=data["x_label"]),
-                y=alt.Y("Probability Density:Q", title=data["y_label"]),
+                y=alt.Y("Probability Density:Q", title=data["y_label"], scale=y_scale),
                 color=alt.Color(
                     "Region:N",
                     scale=alt.Scale(

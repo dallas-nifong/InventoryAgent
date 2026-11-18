@@ -762,7 +762,7 @@ def run_streamlit_app():
                 st.caption(escape_dollars(chart_caption))
                 if opt_table_df is not None:
                     st.markdown("#### 📋 Price Break Tier Comparison Table")
-                    st.dataframe(opt_table_df, use_container_width=True)
+                    st.dataframe(opt_table_df, use_container_width=True, hide_index=True)
 
             # Download report button: downloads full report as Markdown named after model and date
             st.markdown("---")
