@@ -12,9 +12,15 @@ Customer Question -> Identify Model -> Extract Inputs -> Select Tool -> Calculat
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 
 from inventory_agent import AgentResponse, InventoryAgent
 
@@ -118,6 +124,127 @@ def run_cli_interactive(agent: InventoryAgent):
 
 
 # =============================================================================
+# CSV DATA UPLOAD & INVENTORY ANALYTICS UTILITIES
+# =============================================================================
+
+REQUIRED_CSV_COLUMNS = ["Product", "Category", "Units", "Unit Cost"]
+
+
+def process_uploaded_csv(file_or_buffer: Any) -> Tuple[Optional[Any], List[str]]:
+    """
+    Read an uploaded CSV file into a pandas DataFrame and validate required columns.
+
+    Required columns:
+    - Product
+    - Category
+    - Units
+    - Unit Cost
+
+    Returns:
+        Tuple of (dataframe, missing_columns_list)
+    """
+    global pd
+    if pd is None:
+        import pandas as pd
+
+    try:
+        df = pd.read_csv(file_or_buffer)
+    except Exception as e:
+        return None, [f"Error reading CSV: {e}"]
+
+    # Clean whitespace in column names if any
+    df.columns = [str(col).strip() for col in df.columns]
+
+    missing = [col for col in REQUIRED_CSV_COLUMNS if col not in df.columns]
+    if missing:
+        return df, missing
+
+    # Coerce numeric columns cleanly without dropping valid rows
+    if "Units" in df.columns:
+        if not pd.api.types.is_numeric_dtype(df["Units"]):
+            df["Units"] = pd.to_numeric(
+                df["Units"].astype(str).str.replace(",", "", regex=False).str.strip(),
+                errors="coerce",
+            )
+        else:
+            df["Units"] = pd.to_numeric(df["Units"], errors="coerce")
+
+    if "Unit Cost" in df.columns:
+        if not pd.api.types.is_numeric_dtype(df["Unit Cost"]):
+            df["Unit Cost"] = pd.to_numeric(
+                df["Unit Cost"]
+                .astype(str)
+                .str.replace("$", "", regex=False)
+                .str.replace(",", "", regex=False)
+                .str.strip(),
+                errors="coerce",
+            )
+        else:
+            df["Unit Cost"] = pd.to_numeric(df["Unit Cost"], errors="coerce")
+
+    return df, []
+
+
+def calculate_inventory_dataframe_metrics(df: Any) -> Dict[str, Any]:
+    """
+    Perform pandas-based data calculations on the uploaded inventory dataframe:
+    1. Calculate total Units.
+    2. Calculate average Unit Cost.
+    3. Identify the Product with the highest Units.
+    4. Group the data by Category and calculate total Units for each Category.
+    5. Create a new calculated column: Inventory Value = Units × Unit Cost.
+    6. Calculate total Inventory Value across all products.
+
+    Returns:
+        Dictionary with analytical results and the enhanced dataframe.
+    """
+    global pd
+    if pd is None:
+        import pandas as pd
+
+    df_calc = df.copy()
+
+    # 1. Total Units
+    total_units = float(df_calc["Units"].sum())
+
+    # 2. Average Unit Cost
+    avg_unit_cost = float(df_calc["Unit Cost"].mean())
+
+    # 3. Product with highest Units
+    if not df_calc.empty and df_calc["Units"].notna().any():
+        max_idx = df_calc["Units"].idxmax()
+        highest_units_product = str(df_calc.loc[max_idx, "Product"])
+        highest_units_count = float(df_calc.loc[max_idx, "Units"])
+    else:
+        highest_units_product = "N/A"
+        highest_units_count = 0.0
+
+    # 4. Group by Category and calculate total Units for each Category
+    category_units_df = (
+        df_calc.groupby("Category")["Units"]
+        .sum()
+        .reset_index()
+        .sort_values(by="Units", ascending=False)
+    )
+
+    # 5. Create new calculated column: Inventory Value = Units * Unit Cost
+    df_calc["Inventory Value"] = df_calc["Units"] * df_calc["Unit Cost"]
+
+    # 6. Total Inventory Value across all products
+    total_inventory_value = float(df_calc["Inventory Value"].sum())
+
+    return {
+        "total_units": total_units,
+        "avg_unit_cost": avg_unit_cost,
+        "highest_units_product": highest_units_product,
+        "highest_units_count": highest_units_count,
+        "category_units_df": category_units_df,
+        "total_inventory_value": total_inventory_value,
+        "dataframe_with_inventory_value": df_calc,
+    }
+
+
+# =============================================================================
 # STREAMLIT WEB UI IMPLEMENTATION
 # =============================================================================
 
@@ -204,7 +331,89 @@ def run_streamlit_app():
         st.caption("4. **Fixed-Period Review**: Periodic (T, S) base stock")
         st.caption("5. **Newsvendor**: Single-period stochastic inventory")
 
+        # Section: Data Upload (Last section in sidebar)
+        st.divider()
+        st.header("📁 Data Upload")
+        uploaded_file = st.file_uploader(
+            "Upload CSV File",
+            type=["csv"],
+            help="Upload a CSV file containing: Product, Category, Units, Unit Cost",
+        )
+
     # Main Area
+    # -------------------------------------------------------------------------
+    # CSV Data Upload & Inventory Analytics Display
+    # -------------------------------------------------------------------------
+    if uploaded_file is not None:
+        st.markdown("---")
+        st.header("📁 Uploaded Inventory Data & Analysis")
+
+        df_raw, missing_cols = process_uploaded_csv(uploaded_file)
+
+        if missing_cols:
+            st.error(
+                f"❌ **Validation Error**: Missing required column(s): **{', '.join(missing_cols)}**.\n\n"
+                f"The CSV file must contain the following required columns: **{', '.join(REQUIRED_CSV_COLUMNS)}**."
+            )
+        elif df_raw is None or df_raw.empty:
+            st.warning("⚠️ The uploaded CSV file is empty. Please upload a CSV containing product inventory records.")
+        else:
+            # 1. Dataset Dimensions and Column Names
+            st.subheader("📋 Dataset Overview")
+            col_r, col_c, col_names = st.columns([1, 1, 2])
+            with col_r:
+                st.metric("Number of Rows", f"{len(df_raw):,}")
+            with col_c:
+                st.metric("Number of Columns", f"{len(df_raw.columns):,}")
+            with col_names:
+                st.markdown("**Column Names:**")
+                st.write(", ".join(list(df_raw.columns)))
+
+            # Display uploaded dataframe
+            st.markdown("**Uploaded Dataframe:**")
+            st.dataframe(df_raw, use_container_width=True)
+
+            # 2. Data Analysis Calculations
+            metrics = calculate_inventory_dataframe_metrics(df_raw)
+
+            st.subheader("📊 Inventory Data Analysis Results")
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Total Units", f"{metrics['total_units']:,.0f}")
+            with k2:
+                st.metric("Average Unit Cost", f"${metrics['avg_unit_cost']:,.2f}")
+            with k3:
+                st.metric("Product with Highest Units", metrics["highest_units_product"])
+                st.caption(f"{metrics['highest_units_count']:,.0f} units")
+            with k4:
+                st.metric("Total Inventory Value", f"${metrics['total_inventory_value']:,.2f}")
+
+            # Total Units by Category
+            st.markdown("### 🏷️ Total Units by Category")
+            category_df = metrics["category_units_df"]
+            st.dataframe(
+                category_df,
+                column_config={
+                    "Units": st.column_config.NumberColumn("Total Units", format="%d"),
+                },
+                use_container_width=True,
+            )
+
+            # Dataframe including the new Inventory Value column
+            st.markdown("### 💰 Inventory Dataframe (with Inventory Value Column)")
+            st.caption("New Calculated Column: `Inventory Value = Units × Unit Cost`")
+            df_with_val = metrics["dataframe_with_inventory_value"]
+            st.dataframe(
+                df_with_val,
+                column_config={
+                    "Unit Cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+                    "Inventory Value": st.column_config.NumberColumn("Inventory Value", format="$%.2f"),
+                    "Units": st.column_config.NumberColumn("Units", format="%d"),
+                },
+                use_container_width=True,
+            )
+
+        st.markdown("---")
     default_val = preset_text if preset_text else "Our annual demand is 10,000 units, ordering cost is $50, and holding cost is $2 per unit per year. What is our EOQ?"
     query = st.text_area(
         "Enter your natural language inventory question:",
