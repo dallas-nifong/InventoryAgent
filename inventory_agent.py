@@ -950,28 +950,49 @@ class InventoryAgent:
             # 5. Baseline Unit Purchase Price (if given)
             base_p = self._extract_number(q, [
                 r"\b(?:baseline\s+(?:unit\s+)?purchase\s+price|regular\s+price|base\s+price|standard\s+price)\s*(?:is|are|of|=|:)?\s*\$?\s*(-?[\d,]+(?:\.\d+)?)",
-                r"\b(?:charges?|supplier\s+charges?)\s*\$?\s*(-?[\d,]+(?:\.\d+)?)\s*(?:per\s+" + UNIT_WORDS + r")?",
+                r"\b(?:charges?|supplier\s+charges?)\s*\$?\s*(-?[\d,]+(?:\.\d+)?)\s*(?:per\s+" + UNIT_WORDS + r")?\s*(?:but\s+drops|\band\s+drops|however|\byet\b)",
             ])
 
             # 6. Parse Quantity Breaks & Unit Prices
             tiers: List[Dict[str, Any]] = []
 
+            # Common connecting phrases between price and quantity condition
+            conn = r"(?:per\s+" + UNIT_WORDS + r"|per\s+unit|each)?\s*(?:for|if\s+buying|if\s+ordering|when\s+ordering|at)?\s*(?:orders?\s+(?:of\s+)?)?"
+            upper_words = r"(?:under|less\s+than|below|fewer\s+than|up\s+to)"
+            lower_words_pre = r"(?:at\s+least|over|above)"
+            lower_words_post = r"(?:\+|and\s+above|or\s+more|and\s+over|and\s+up)"
+
             # (A) Check price-first schedules:
-            # "$1.20 for 1-299 units, $1.10 for 300-799 units, and $1.00 for 800 or more units"
             price_first_tiers: List[Dict[str, Any]] = []
+
+            # 1. Price-first upper bound: "$12 per unit for orders below 500 units"
             for pm in re.finditer(
-                r"\$\s*([\d]+(?:\.\d+)?)\s*(?:for|if\s+buying|if\s+ordering|per\s+unit\s+for|each\s+for)\s*(?:between\s+)?([\d,]+)\s*(?:-|–|to)\s*([\d,]+)\s*(?:" + UNIT_WORDS + r")?",
+                r"\$\s*([\d]+(?:\.\d+)?)\s*" + conn + r"(" + upper_words + r")\s+([\d,]+)\s*(?:" + UNIT_WORDS + r")?",
+                q,
+                re.I,
+            ):
+                p_val = self._clean_number(pm.group(1))
+                q_bound = self._clean_number(pm.group(3))
+                is_strict = any(w in pm.group(2).lower() for w in ["under", "less", "below", "fewer"])
+                if p_val is not None and q_bound is not None:
+                    max_q = (q_bound - 1.0) if is_strict else q_bound
+                    price_first_tiers.append({"min_qty": 1.0, "max_qty": max_q, "unit_price": p_val})
+
+            # 2. Price-first middle range: "$11.50 for 500-999 units", "$11.50 for between 500 and 999 units"
+            for pm in re.finditer(
+                r"\$\s*([\d]+(?:\.\d+)?)\s*" + conn + r"(?:between\s+)?([\d,]+)\s*(?:-|–|to|and)\s*([\d,]+)\s*(?:" + UNIT_WORDS + r")?",
                 q,
                 re.I,
             ):
                 p_val = self._clean_number(pm.group(1))
                 q_low = self._clean_number(pm.group(2))
                 q_high = self._clean_number(pm.group(3))
-                if p_val is not None and q_low is not None and q_high is not None:
+                if p_val is not None and q_low is not None and q_high is not None and q_high > q_low:
                     price_first_tiers.append({"min_qty": q_low, "max_qty": q_high, "unit_price": p_val})
 
+            # 3. Price-first lower bound with prefix keyword: "$11 for at least 1,000 units"
             for pm in re.finditer(
-                r"\$\s*([\d]+(?:\.\d+)?)\s*(?:for|if\s+buying|if\s+ordering|per\s+unit\s+for|each\s+for)\s*([\d,]+)\s*(?:\+|and\s+above|or\s+more|and\s+over)\s*(?:" + UNIT_WORDS + r")?",
+                r"\$\s*([\d]+(?:\.\d+)?)\s*" + conn + lower_words_pre + r"\s+([\d,]+)\s*(?:" + UNIT_WORDS + r")?",
                 q,
                 re.I,
             ):
@@ -980,52 +1001,51 @@ class InventoryAgent:
                 if p_val is not None and q_min is not None:
                     price_first_tiers.append({"min_qty": q_min, "max_qty": None, "unit_price": p_val})
 
+            # 4. Price-first lower bound with suffix keyword: "$11 for orders of 1,000 units or more", "$11 for 1,000 and up"
             for pm in re.finditer(
-                r"\$\s*([\d]+(?:\.\d+)?)\s*(?:for|if\s+buying|if\s+ordering|per\s+unit\s+for|each\s+for)\s*(?:over|at\s+least|above)\s*([\d,]+)\s*(?:" + UNIT_WORDS + r")?",
+                r"\$\s*([\d]+(?:\.\d+)?)\s*" + conn + r"([\d,]+)\s*(?:" + UNIT_WORDS + r")?\s*" + lower_words_post + r"\s*(?:" + UNIT_WORDS + r")?",
                 q,
                 re.I,
             ):
                 p_val = self._clean_number(pm.group(1))
                 q_min = self._clean_number(pm.group(2))
                 if p_val is not None and q_min is not None:
-                    if not any(t["min_qty"] == q_min and t["max_qty"] is None for t in price_first_tiers):
-                        price_first_tiers.append({"min_qty": q_min, "max_qty": None, "unit_price": p_val})
-
-            for pm in re.finditer(
-                r"\$\s*([\d]+(?:\.\d+)?)\s*(?:for|if\s+buying|if\s+ordering|per\s+unit\s+for|each\s+for)\s*(?:under|less\s+than|up\s+to)\s*([\d,]+)\s*(?:" + UNIT_WORDS + r")?",
-                q,
-                re.I,
-            ):
-                p_val = self._clean_number(pm.group(1))
-                q_max = self._clean_number(pm.group(2))
-                if p_val is not None and q_max is not None:
-                    price_first_tiers.append({"min_qty": 0.0, "max_qty": q_max - 1.0, "unit_price": p_val})
+                    price_first_tiers.append({"min_qty": q_min, "max_qty": None, "unit_price": p_val})
 
             if price_first_tiers:
                 tiers.extend(price_first_tiers)
             else:
                 # (B) Quantity-first tiers:
-                # Lower bounded tiers: "under 50 cases $20", "less than 500 units at $15", "up to 500: $15"
-                for um in re.finditer(r"\b(?:under|less\s+than|up\s+to)\s+([\d,]+)\s*(?:" + UNIT_WORDS + r")?\s*(?:at|costs?|is|are|:|@|=)?\s*\$?\s*([\d]+(?:\.\d+)?)", q, re.I):
-                    tiers.append({"min_qty": 0.0, "max_qty": self._clean_number(um.group(1)) - 1.0, "unit_price": self._clean_number(um.group(2))})
+                # Lower bounded / upper open tiers: "under 50 cases $20", "below 500 units at $15", "up to 500: $15"
+                for um in re.finditer(
+                    r"\b(" + upper_words + r")\s+([\d,]+)\s*(?:" + UNIT_WORDS + r")?\s*(?:at|costs?|is|are|:|@|=)?\s*\$?\s*([\d]+(?:\.\d+)?)",
+                    q,
+                    re.I,
+                ):
+                    is_strict = any(w in um.group(1).lower() for w in ["under", "less", "below", "fewer"])
+                    q_bound = self._clean_number(um.group(2))
+                    p_val = self._clean_number(um.group(3))
+                    if q_bound is not None and p_val is not None:
+                        max_q = (q_bound - 1.0) if is_strict else q_bound
+                        tiers.append({"min_qty": 1.0, "max_qty": max_q, "unit_price": p_val})
 
                 # Middle ranges: "1-49 cases $20", "50-79 cases at $18", "80-99 cases $17", "between 500 and 999: $28"
                 # (negative lookahead prevents matching price that belongs to subsequent price-first tier)
                 for rm in re.finditer(
-                    r"\b(?:between\s+)?([\d,]+)\s*(?:-|–|to|and)\s*([\d,]+)\s*(?:" + UNIT_WORDS + r")?\s*(?:at|costs?|is|are|:|@|=)?\s*\$?\s*([\d]+(?:\.\d+)?)(?!\s*(?:for|per\s+unit\s+for)\s+[\d,]+)",
+                    r"\b(?:between\s+([\d,]+)\s+and\s+([\d,]+)|([\d,]+)\s*(?:-|–|to)\s*([\d,]+))\s*(?:" + UNIT_WORDS + r")?\s*(?:at|costs?|is|are|:|@|=)?\s*\$?\s*([\d]+(?:\.\d+)?)(?!\s*(?:for|per\s+unit\s+for)\s+[\d,]+)",
                     q,
                     re.I,
                 ):
-                    q_low = self._clean_number(rm.group(1))
-                    q_high = self._clean_number(rm.group(2))
-                    p_val = self._clean_number(rm.group(3))
+                    q_low = self._clean_number(rm.group(1) or rm.group(3))
+                    q_high = self._clean_number(rm.group(2) or rm.group(4))
+                    p_val = self._clean_number(rm.group(5))
                     if q_low is not None and q_high is not None and p_val is not None:
                         if q_high > q_low:
                             tiers.append({"min_qty": q_low, "max_qty": q_high, "unit_price": p_val})
 
-                # Upper open range: "100 or more cases $16", "1000+ units at $26", "2000 or more units at $13", "over 1000 at $26"
+                # Upper open range: "100 or more cases $16", "1000+ units at $26", "2000 or more units at $13", "1,000 units and up at $11"
                 for pm in re.finditer(
-                    r"\b([\d,]+)\s*(?:\+|and\s+above|or\s+more|and\s+over)\s*(?:" + UNIT_WORDS + r")?\s*(?:at|costs?|is|are|:|@|=)?\s*\$?\s*([\d]+(?:\.\d+)?)(?!\s*(?:for|per\s+unit\s+for)\s+[\d,]+)",
+                    r"\b([\d,]+)\s*(?:" + UNIT_WORDS + r")?\s*" + lower_words_post + r"\s*(?:" + UNIT_WORDS + r")?\s*(?:at|costs?|is|are|:|@|=)?\s*\$?\s*([\d]+(?:\.\d+)?)(?!\s*(?:for|per\s+unit\s+for)\s+[\d,]+)",
                     q,
                     re.I,
                 ):
@@ -1035,7 +1055,7 @@ class InventoryAgent:
                         tiers.append({"min_qty": q_min, "max_qty": None, "unit_price": p_val})
 
                 for om in re.finditer(
-                    r"\b(?:over|above|at\s+least)\s+([\d,]+)\s*(?:" + UNIT_WORDS + r")?\s*(?:at|costs?|is|are|:|@|=)?\s*\$?\s*([\d]+(?:\.\d+)?)(?!\s*(?:for|per\s+unit\s+for)\s+[\d,]+)",
+                    r"\b" + lower_words_pre + r"\s+([\d,]+)\s*(?:" + UNIT_WORDS + r")?\s*(?:at|costs?|is|are|:|@|=)?\s*\$?\s*([\d]+(?:\.\d+)?)(?!\s*(?:for|per\s+unit\s+for)\s+[\d,]+)",
                     q,
                     re.I,
                 ):
@@ -1061,6 +1081,13 @@ class InventoryAgent:
                             {"min_qty": break_qty, "max_qty": None, "unit_price": drop_price},
                         ]
 
+            # Sort tiers and adjust boundary if up-to matches next tier min_qty
+            tiers.sort(key=lambda x: x["min_qty"])
+            for i in range(len(tiers) - 1):
+                if tiers[i]["max_qty"] is not None and tiers[i + 1]["min_qty"] is not None:
+                    if tiers[i]["max_qty"] == tiers[i + 1]["min_qty"]:
+                        tiers[i]["max_qty"] -= 1.0
+
             # Deduplicate and sort tiers
             seen_brackets = set()
             unique_tiers = []
@@ -1073,7 +1100,9 @@ class InventoryAgent:
             # Item 2 validation: If the question contains more prices or quantity ranges
             # than the number of tiers parsed, report the discount schedule as missing instead of calculating.
             range_matches = re.findall(
-                r"\b\d+\s*(?:-|–|to)\s*\d+\b|\b\d+\s*(?:\+|or\s+more|and\s+above|and\s+over)\b|\b(?:under|less\s+than|up\s+to|over|above|at\s+least)\s+\d+\b",
+                r"\b[\d,]+\s*(?:-|–|to)\s*[\d,]+\b"
+                r"|\b[\d,]+\s*(?:" + UNIT_WORDS + r")?\s*(?:\+|or\s+more\b|and\s+above\b|and\s+over\b|and\s+up\b)"
+                r"|\b(?:under|less\s+than|below|fewer\s+than|up\s+to|over|above|at\s+least)\s+(?:orders?\s+(?:of\s+)?)?[\d,]+\b",
                 q,
                 re.I,
             )
@@ -1208,11 +1237,9 @@ class InventoryAgent:
                 r"\bdelivery\s+time\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
             ])
 
-            demand_unit = "day"
-            if re.search(r"\b(?:weekly|per\s+week|a\s+week)\b", q, re.I):
-                demand_unit = "week"
-            elif re.search(r"\b(?:monthly|per\s+month|a\s+month)\b", q, re.I):
-                demand_unit = "month"
+            # Determine time unit of demand
+            d_val_tmp, d_unit_tmp = self._extract_demand_info(q)
+            demand_unit = d_unit_tmp if d_unit_tmp else ("week" if re.search(r"\b(?:weekly|per\s+week|a\s+week)\b", q, re.I) else ("month" if re.search(r"\b(?:monthly|per\s+month|a\s+month)\b", q, re.I) else "day"))
 
             lt_unit = "day"
             lt_match = re.search(r"\blead[- ]time\s+(?:is|averages|is\s+a\s+constant\s+)?(?:of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)\s*(days?|weeks?|months?|business\s+days?|work\s+days?)", q, re.I)
@@ -1230,18 +1257,55 @@ class InventoryAgent:
             if lt_raw is not None:
                 if lt_raw <= 0:
                     invalid_inputs.append(f"Lead time (extracted: {lt_raw}) must be strictly positive (> 0).")
+
+                conversion_factor = 1.0
+                conversion_note_phrase = ""
+
                 if demand_unit == "day" and lt_unit == "week":
-                    converted_lt = lt_raw * 7.0
-                    conversion_notes.append(f"Lead time of {lt_raw:g} weeks converted to {converted_lt:g} days (× 7 days/week) to match daily demand.")
-                    inputs["lead_time"] = converted_lt
-                    inputs["lead_time_unit_converted"] = True
+                    conversion_factor = 7.0
+                    conversion_note_phrase = "× 7 days/week"
                 elif demand_unit == "week" and lt_unit == "day":
-                    converted_lt = lt_raw / 7.0
-                    conversion_notes.append(f"Lead time of {lt_raw:g} days converted to {converted_lt:.2f} weeks (÷ 7 days/week) to match weekly demand.")
+                    conversion_factor = 1.0 / 7.0
+                    conversion_note_phrase = "÷ 7 days/week"
+                elif demand_unit == "day" and lt_unit == "month":
+                    m_days = re.search(r"\b(\d+)\s*(?:operating\s+days|work(?:ing)?\s+days|days)\s*(?:a|per)\s*month\b", q, re.I)
+                    days_per_month = float(m_days.group(1)) if m_days else 30.0
+                    conversion_factor = days_per_month
+                    conversion_note_phrase = f"× {days_per_month:g} days/month"
+                elif demand_unit == "week" and lt_unit == "month":
+                    conversion_factor = 4.0
+                    conversion_note_phrase = "× 4 weeks/month"
+                elif demand_unit == "month" and lt_unit == "day":
+                    m_days = re.search(r"\b(\d+)\s*(?:operating\s+days|work(?:ing)?\s+days|days)\s*(?:a|per)\s*month\b", q, re.I)
+                    days_per_month = float(m_days.group(1)) if m_days else 30.0
+                    conversion_factor = 1.0 / days_per_month
+                    conversion_note_phrase = f"÷ {days_per_month:g} days/month"
+                elif demand_unit == "month" and lt_unit == "week":
+                    conversion_factor = 1.0 / 4.0
+                    conversion_note_phrase = "÷ 4 weeks/month"
+
+                if conversion_factor != 1.0:
+                    demand_unit_adj = "daily" if demand_unit == "day" else ("weekly" if demand_unit == "week" else ("monthly" if demand_unit == "month" else demand_unit))
+                    converted_lt = lt_raw * conversion_factor
+                    inputs["_raw_lead_time"] = lt_raw
                     inputs["lead_time"] = converted_lt
                     inputs["lead_time_unit_converted"] = True
-                elif demand_unit == "day" and lt_unit == "month":
-                    missing.append("operating_days_per_month (to convert lead time from months to days without unstated assumptions)")
+                    conversion_notes.append(f"Lead time of {lt_raw:g} {lt_unit}s converted to {converted_lt:g} {demand_unit}s ({conversion_note_phrase}) to match {demand_unit_adj} demand.")
+
+                    if "std_lead_time" in inputs and inputs["std_lead_time"] > 0:
+                        raw_std_lt = inputs["std_lead_time"]
+                        inputs["_raw_std_lead_time"] = raw_std_lt
+                        converted_std_lt = raw_std_lt * conversion_factor
+                        inputs["std_lead_time"] = converted_std_lt
+                        conversion_notes.append(f"Lead-time standard deviation of {raw_std_lt:g} {lt_unit}s converted to {converted_std_lt:g} {demand_unit}s ({conversion_note_phrase}) to match {demand_unit_adj} demand.")
+
+                    if "lead_time_variance" in inputs and inputs["lead_time_variance"] > 0:
+                        raw_lt_var = inputs["lead_time_variance"]
+                        inputs["_raw_lead_time_variance"] = raw_lt_var
+                        var_factor = conversion_factor ** 2
+                        converted_lt_var = raw_lt_var * var_factor
+                        inputs["lead_time_variance"] = converted_lt_var
+                        conversion_notes.append(f"Lead-time variance of {raw_lt_var:g} {lt_unit}s² converted to {converted_lt_var:g} {demand_unit}s² (× {var_factor:g}) to match {demand_unit_adj} demand.")
                 else:
                     inputs["lead_time"] = lt_raw
             elif "lead_time_demand_mean" not in inputs:
@@ -1249,11 +1313,8 @@ class InventoryAgent:
 
             # 3. Average Demand (if figures during lead time not given)
             if "lead_time_demand_mean" not in inputs:
-                d_val, d_unit = self._extract_demand_info(q)
-                if d_val is not None:
-                    d = d_val
-                    if demand_unit is None and d_unit:
-                        demand_unit = d_unit
+                if d_val_tmp is not None:
+                    d = d_val_tmp
                 else:
                     d = self._extract_number(q, [
                         r"\b(?:average\s+demand|mean\s+demand|expected\s+demand|daily\s+demand|weekly\s+demand|average\s+daily\s+demand|average\s+weekly\s+demand|demand\s+rate|demand\s+averages)\s*(?:is|are|of|=|:)?\s*(-?[\d,]+(?:\.\d+)?)",
@@ -1372,9 +1433,25 @@ class InventoryAgent:
                 if demand_unit == "day" and t_unit == "week":
                     converted_t = t_raw * 7.0
                     conversion_notes.append(f"Review period of {t_raw:g} weeks converted to {converted_t:g} days (× 7 days/week) to match daily demand.")
+                    inputs["_raw_review_period"] = t_raw
+                    inputs["review_period"] = converted_t
+                elif demand_unit == "week" and t_unit == "day":
+                    converted_t = t_raw / 7.0
+                    conversion_notes.append(f"Review period of {t_raw:g} days converted to {converted_t:.2f} weeks (÷ 7 days/week) to match weekly demand.")
+                    inputs["_raw_review_period"] = t_raw
                     inputs["review_period"] = converted_t
                 elif demand_unit == "day" and t_unit == "month":
-                    missing.append("operating_days_per_month (to convert review period from months to days without unstated assumptions)")
+                    m_days = re.search(r"\b(\d+)\s*(?:operating\s+days|work(?:ing)?\s+days|days)\s*(?:a|per)\s*month\b", q, re.I)
+                    days_per_month = float(m_days.group(1)) if m_days else 30.0
+                    converted_t = t_raw * days_per_month
+                    conversion_notes.append(f"Review period of {t_raw:g} months converted to {converted_t:g} days (× {days_per_month:g} days/month) to match daily demand.")
+                    inputs["_raw_review_period"] = t_raw
+                    inputs["review_period"] = converted_t
+                elif demand_unit == "week" and t_unit == "month":
+                    converted_t = t_raw * 4.0
+                    conversion_notes.append(f"Review period of {t_raw:g} months converted to {converted_t:g} weeks (× 4 weeks/month) to match weekly demand.")
+                    inputs["_raw_review_period"] = t_raw
+                    inputs["review_period"] = converted_t
                 else:
                     inputs["review_period"] = t_raw
             else:
@@ -1387,9 +1464,25 @@ class InventoryAgent:
                 if demand_unit == "day" and lt_unit == "week":
                     converted_lt = lt_raw * 7.0
                     conversion_notes.append(f"Lead time of {lt_raw:g} weeks converted to {converted_lt:g} days (× 7 days/week) to match daily demand.")
+                    inputs["_raw_lead_time"] = lt_raw
+                    inputs["lead_time"] = converted_lt
+                elif demand_unit == "week" and lt_unit == "day":
+                    converted_lt = lt_raw / 7.0
+                    conversion_notes.append(f"Lead time of {lt_raw:g} days converted to {converted_lt:.2f} weeks (÷ 7 days/week) to match weekly demand.")
+                    inputs["_raw_lead_time"] = lt_raw
                     inputs["lead_time"] = converted_lt
                 elif demand_unit == "day" and lt_unit == "month":
-                    missing.append("operating_days_per_month (to convert lead time from months to days without unstated assumptions)")
+                    m_days = re.search(r"\b(\d+)\s*(?:operating\s+days|work(?:ing)?\s+days|days)\s*(?:a|per)\s*month\b", q, re.I)
+                    days_per_month = float(m_days.group(1)) if m_days else 30.0
+                    converted_lt = lt_raw * days_per_month
+                    conversion_notes.append(f"Lead time of {lt_raw:g} months converted to {converted_lt:g} days (× {days_per_month:g} days/month) to match daily demand.")
+                    inputs["_raw_lead_time"] = lt_raw
+                    inputs["lead_time"] = converted_lt
+                elif demand_unit == "week" and lt_unit == "month":
+                    converted_lt = lt_raw * 4.0
+                    conversion_notes.append(f"Lead time of {lt_raw:g} months converted to {converted_lt:g} weeks (× 4 weeks/month) to match weekly demand.")
+                    inputs["_raw_lead_time"] = lt_raw
+                    inputs["lead_time"] = converted_lt
                 else:
                     inputs["lead_time"] = lt_raw
             else:
@@ -2189,6 +2282,8 @@ class InventoryAgent:
 
         for k, v in extracted_inputs.items():
             if k.startswith("_"):
+                if k.startswith("_raw_"):
+                    _add_num(v)
                 continue
             _add_num(v)
 
@@ -2391,6 +2486,8 @@ class InventoryAgent:
         conversion_notes = extracted_inputs.pop("_conversion_notes", [])
 
         if invalid_inputs:
+            for raw_k in [k for k in extracted_inputs if k.startswith("_raw_")]:
+                extracted_inputs.pop(raw_k, None)
             explanation = (
                 f"### ❌ Invalid Input Parameter(s) for {model_name} Model\n\n"
                 f"One or more extracted numerical parameters have invalid values (must be strictly positive):\n\n"
@@ -2413,6 +2510,8 @@ class InventoryAgent:
 
         # Check if critical parameters are missing
         if missing_inputs:
+            for raw_k in [k for k in extracted_inputs if k.startswith("_raw_")]:
+                extracted_inputs.pop(raw_k, None)
             explanation = (
                 f"### ⚠️ Clarification Needed for {model_name} Model\n\n"
                 f"I identified that your question relates to **{model_name}** (confidence: {confidence*100:.0f}%), "
@@ -2463,6 +2562,11 @@ class InventoryAgent:
 
         # Stage 6: Explain
         unused_values = self._detect_unused_values(question, extracted_inputs, calculation_result)
+
+        # Remove internal raw tracking keys from returned extracted_inputs
+        for raw_k in [k for k in extracted_inputs if k.startswith("_raw_")]:
+            extracted_inputs.pop(raw_k, None)
+
         explanation = self.generate_explanation(
             question, model_name, calculation_result, verification, unused_values=unused_values
         )
