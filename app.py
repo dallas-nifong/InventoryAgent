@@ -636,399 +636,402 @@ def run_streamlit_app():
             6. 📢 **Explain**
             """)
 
-    # Main Area
+    # Top-Level Tabs
+    tab_models, tab_csv = st.tabs([
+        "Inventory Models",
+        "Inventory Classification (CSV)",
+    ])
+
     # -------------------------------------------------------------------------
-    # CSV Data Upload & Inventory Analytics Display
+    # TAB 1: Inventory Models (Question Input, Execution Pipeline, Verification)
     # -------------------------------------------------------------------------
-    if uploaded_file is not None:
-        st.markdown("---")
-        st.header("📁 Uploaded Inventory Data & Analysis")
+    with tab_models:
+        query = st.text_area(
+            "Enter your natural language inventory question:",
+            height=100,
+            placeholder="e.g., Annual demand is 5000, setup cost is $40, supplier price breaks are...",
+            key="query_text_area",
+        )
+        st.session_state["current_question"] = query
 
-        df_raw, missing_cols = process_uploaded_csv(uploaded_file)
+        col_btn1, col_btn2 = st.columns([1, 5])
+        with col_btn1:
+            run_btn = st.button("🚀 Analyze & Optimize", type="primary", use_container_width=True)
 
-        if missing_cols:
-            st.error(
-                f"❌ **Validation Error**: Missing required column(s): **{', '.join(missing_cols)}**.\n\n"
-                f"Please ensure your CSV matches either:\n"
-                f"- **Inventory Classification**: {', '.join(CLASSIFICATION_REQUIRED_COLUMNS)}\n"
-                f"- **Product Inventory**: {', '.join(REQUIRED_CSV_COLUMNS)}"
-            )
-        elif df_raw is None or df_raw.empty:
-            st.warning("⚠️ The uploaded CSV file is empty. Please upload a CSV containing inventory records.")
-        else:
-            dataset_type = getattr(df_raw, "attrs", {}).get("dataset_type", "inventory")
-            if dataset_type == "classification" or ("Hits" in df_raw.columns and "Sales ($)" in df_raw.columns):
-                # -------------------------------------------------------------
-                # MULTICRITERIA INVENTORY CLASSIFICATION (SALES & HITS)
-                # -------------------------------------------------------------
-                st.subheader("📋 Dataset Overview")
-                col_r, col_c, col_names = st.columns([1, 1, 2])
-                with col_r:
-                    st.metric("Number of Items", f"{len(df_raw):,}")
-                with col_c:
-                    st.metric("Number of Columns", f"{len(df_raw.columns):,}")
-                with col_names:
-                    st.markdown("**Column Names:**")
-                    st.write(", ".join(list(df_raw.columns)))
+        # Execute analysis only when requested (button click or new benchmark selected)
+        if run_btn or benchmark_selected:
+            with st.spinner("Executing 6-Stage Inventory Pipeline..."):
+                st.session_state["latest_response"] = agent.process_question(st.session_state["current_question"])
 
-                # Perform multicriteria classification
-                cls_results = calculate_multicriteria_inventory_classification(df_raw)
-                classified_df = cls_results["dataframe"]
-                class_summary_df = cls_results["class_summary_df"]
-                total_sales = cls_results["total_sales"]
-                total_hits = cls_results["total_hits"]
-                total_items = cls_results["total_items"]
+        resp: Optional[AgentResponse] = st.session_state.get("latest_response")
 
-                st.subheader("🏷️ Multicriteria Inventory Classification Results (A, B, C, D)")
-                st.caption(
-                    "Classified using **Sales ($)** (Monetary Value / Revenue Velocity) and "
-                    "**Hits** (Picking Frequency / Transaction Velocity)."
+        # -------------------------------------------------------------------------
+        # Results Display
+        # -------------------------------------------------------------------------
+        if resp is not None:
+            # Status Message 1: Unused values yellow warning banner above results
+            if resp.unused_values:
+                unused_items = []
+                for u in resp.unused_values:
+                    if hasattr(u, "context") and u.context:
+                        val_repr = getattr(u, "_int_or_float", u)
+                        unused_items.append(f"{val_repr} (in '{u.context}')")
+                    else:
+                        unused_items.append(str(u))
+                st.warning(f"⚠️ **Warning: these values from your question were not used in the calculation:** {escape_dollars(', '.join(unused_items))}")
+
+            # Status Message 2: Missing inputs error message (no result cards)
+            if resp.missing_inputs:
+                st.error(
+                    f"⚠️ **Clarification Needed for {resp.model_name} Model**\n\n"
+                    f"I identified that your question relates to **{resp.model_name}** "
+                    f"(Match Strength: {resp.confidence * 100:.0f}%), but the following required parameter(s) are missing:\n\n"
+                    + "\n".join([f"- **{m}**" for m in resp.missing_inputs]) + "\n\n"
+                    f"Please provide these values so I can execute the exact calculation."
+                )
+                if resp.extracted_inputs:
+                    with st.expander("📥 Parameters Extracted So Far", expanded=True):
+                        st.json(resp.extracted_inputs)
+
+            # Status Message 3: Unsupported model info message (no result cards)
+            elif resp.model_name in ("unsupported", InventoryAgent.MODEL_UNSUPPORTED):
+                st.info(
+                    "❓ **Unsupported Question**\n\n"
+                    "I could not match your question to any of the 5 supported inventory decision models. "
+                    "The supported inventory models are:\n\n"
+                    "1. **Economic Order Quantity (EOQ)**: Classical Wilson lot-sizing for constant demand under ordering/setup and holding cost trade-offs.\n"
+                    "2. **Quantity Discount**: All-units price-break analysis evaluating feasible batch sizes and total annual acquisition and inventory costs.\n"
+                    "3. **Safety Stock and Reorder Point (ROP)**: Continuous review (s, Q) replenishment policy under demand and/or lead-time variability.\n"
+                    "4. **Fixed-Period Review**: Periodic review (T, S) order-up-to base-stock replenishment policy for fixed review intervals.\n"
+                    "5. **Newsvendor**: Single-period stochastic inventory optimization for seasonal or perishable products with underage and overage risks.\n\n"
+                    "Please rephrase your question using relevant parameters from one of these models."
                 )
 
-                # Summary Metrics
-                k1, k2, k3, k4 = st.columns(4)
-                with k1:
-                    st.metric("Total Items", f"{total_items:,}")
-                with k2:
-                    st.metric("Total Sales", f"${total_sales:,.2f}")
-                with k3:
-                    st.metric("Total Activity (Hits)", f"{total_hits:,.0f} picks")
-                with k4:
-                    cls_a_sub = class_summary_df[class_summary_df["Final Class"] == "A"]
-                    a_items = int(cls_a_sub["Number of Items"].iloc[0]) if not cls_a_sub.empty else 0
-                    a_pct = (a_items / total_items * 100.0) if total_items > 0 else 0.0
-                    st.metric("Class A Fast Movers", f"{a_items:,} ({a_pct:.1f}%)")
+            else:
+                # Pipeline status cards (Match Strength renamed with tooltip)
+                st.subheader("🔍 Execution Pipeline Inspection")
+                with st.container(key="inspection_pipeline"):
+                    c1, c2, c3, c4 = st.columns(4)
+                    with c1:
+                        display_model_name = MODEL_DISPLAY_NAMES.get(resp.model_name, resp.model_name)
+                        st.metric("Identified Model", display_model_name)
+                    with c2:
+                        st.metric(
+                            "Match Strength",
+                            f"{resp.confidence * 100:.0f}%",
+                            help="How strongly the wording matched this model's keywords. Not a probability.",
+                        )
+                    with c3:
+                        st.metric("Python Tool", resp.tool_name)
+                    with c4:
+                        status_label = "✅ Verified" if resp.verification.passed else "⚠️ Attention"
+                        st.metric("Verification", status_label)
 
-                # Short Description of BAN 517 Methodology
-                st.markdown(
-                    """
-                    **BAN 517 Multicriteria Inventory Classification Methodology:**
-                    - **Step 1 (Single-Criterion Pareto Ranking):** Items are sorted from largest to smallest for Sales ($) and Hits separately using a stable sort preserving file order for ties. Each item's class is determined from its exact unrounded cumulative percentage:
-                      - **A**: below 60% (Score = 4)
-                      - **B**: 60% to below 80% (Score = 3)
-                      - **C**: 80% to below 90% (Score = 2)
-                      - **D**: 90% to 100% (Score = 1)
-                      *(Every item receives a class on both criteria; zero sales or hits are not special cases)*
-                    - **Step 2 (Combined Weighted Score):** $\\text{Combined Weighted Score} = 0.65 \\times \\text{Sales Score} + 0.35 \\times \\text{Hits Score}$
-                    - **Step 3 (Final Inventory Class):** The combined score is rounded to 2 decimal places before banding:
-                      - **A**: 3.25 to 4.00
-                      - **B**: 2.50 to 3.24
-                      - **C**: 1.75 to 2.49
-                      - **D**: below 1.75
-                    """
-                )
+                # Four distinct tabs without duplication
+                tab_summary, tab_student, tab_checks, tab_inputs = st.tabs([
+                    "Summary",
+                    "Step-by-Step Verification",
+                    "Checks",
+                    "Inputs",
+                ])
 
-                # Class Breakdown Table
-                st.markdown("### 📊 Class Summary Breakdown")
-                summary_display_cols = ["Final Class", "Number of Items", "Total Sales ($)"]
-                st.dataframe(
-                    class_summary_df[summary_display_cols],
-                    column_config={
-                        "Final Class": st.column_config.TextColumn("Final Class"),
-                        "Number of Items": st.column_config.NumberColumn("Number of Items", format="%d"),
-                        "Total Sales ($)": st.column_config.NumberColumn("Total Sales ($)", format="$%,.2f"),
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                )
+                with tab_summary:
+                    # Answer first: Key results as large metric cards
+                    st.subheader("🎯 Key Decision Results")
+                    metric_cards = get_model_metric_cards(resp)
+                    if metric_cards:
+                        mc_cols = st.columns(len(metric_cards))
+                        for idx, (lbl, val) in enumerate(metric_cards):
+                            with mc_cols[idx]:
+                                st.metric(lbl, escape_dollars(val))
 
-                # Classified Inventory Items Table
-                st.markdown("### 📋 Classified Inventory Dataframe")
-                col_filt, col_info = st.columns([1, 2])
-                with col_filt:
-                    filter_class = st.selectbox(
-                        "Filter by Final Class:",
-                        ["All Items", "Class A", "Class B", "Class C", "Class D"],
-                        index=0,
-                        key="filter_class_select",
+                    # Two or three sentence plain-language recommendation
+                    st.markdown("### 💡 Plain-Language Recommendation")
+                    recommendation = get_plain_language_recommendation(resp)
+                    st.info(escape_dollars(recommendation))
+
+                    # One chart per model in Summary tab built from calculation tool values
+                    chart_tuple = build_model_chart(resp)
+                    if chart_tuple is not None:
+                        chart_obj, chart_caption, opt_table_df = chart_tuple
+                        st.markdown("### 📈 Visual Decision Analysis")
+                        st.altair_chart(chart_obj, use_container_width=True, theme="streamlit")
+                        st.caption(escape_dollars(chart_caption))
+                        if opt_table_df is not None:
+                            st.markdown("#### 📋 Price Break Tier Comparison Table")
+                            st.dataframe(opt_table_df, use_container_width=True, hide_index=True)
+
+                    # Download report button: downloads full report as Markdown named after model and date
+                    st.markdown("---")
+                    model_slug = resp.model_name.lower().replace(" ", "_").replace("/", "_")
+                    date_str = datetime.now().strftime("%Y-%m-%d")
+                    report_filename = f"{model_slug}_report_{date_str}.md"
+                    st.download_button(
+                        label="📥 Download Report",
+                        data=resp.explanation,
+                        file_name=report_filename,
+                        mime="text/markdown",
+                        use_container_width=False,
+                        key="download_report_btn",
                     )
 
-                display_df = classified_df.copy()
-                if filter_class != "All Items":
-                    target_cls = filter_class.replace("Class ", "")
-                    display_df = display_df[display_df["Final Class"] == target_cls]
+                with tab_student:
+                    st.markdown("## 🎓 Step-by-Step Verification")
+                    st.caption("All calculation steps below originate deterministically from Python operations research tools.")
+                    report_lines = [
+                        line for line in agent._format_verification_report(resp.model_name, resp.calculation_result, resp.verification)
+                        if "Student Verification Report" not in line
+                    ]
+                    report_md = "\n".join(report_lines)
+                    st.markdown(escape_dollars(report_md))
 
-                # Select and order columns: original columns + added columns
-                standard_cols = [
-                    "Item Number",
-                    "Item Name",
-                    "UoM",
-                    "Sales ($)",
-                    "Sales Cumulative %",
-                    "Sales Class",
-                    "Sales Score",
-                    "Hits",
-                    "Hits Cumulative %",
-                    "Hits Class",
-                    "Hits Score",
-                    "Combined Weighted Score",
-                    "Final Class",
-                ]
-                display_cols = [c for c in standard_cols if c in display_df.columns]
-                extra_cols = [c for c in display_df.columns if c not in display_cols and c != "Inventory Class"]
-                final_col_order = extra_cols + display_cols
+                with tab_checks:
+                    st.subheader("🛡️ Verification Checks & Mathematical Validation")
+                    checks_list = getattr(resp.calculation_result, "verification_checks", []) or resp.verification.checks
+                    for chk in checks_list:
+                        chk_str = escape_dollars(str(chk))
+                        if "FAIL" in str(chk):
+                            st.error(f"❌ {chk_str}")
+                        else:
+                            st.success(f"✅ {chk_str}")
 
-                st.dataframe(
-                    display_df[final_col_order],
-                    column_config={
-                        "Sales ($)": st.column_config.NumberColumn("Sales ($)", format="$%,.2f"),
-                        "Sales Cumulative %": st.column_config.NumberColumn("Sales Cumulative %", format="%.2f%%"),
-                        "Sales Score": st.column_config.NumberColumn("Sales Score", format="%d"),
-                        "Hits": st.column_config.NumberColumn("Hits", format="%d"),
-                        "Hits Cumulative %": st.column_config.NumberColumn("Hits Cumulative %", format="%.2f%%"),
-                        "Hits Score": st.column_config.NumberColumn("Hits Score", format="%d"),
-                        "Combined Weighted Score": st.column_config.NumberColumn("Combined Weighted Score", format="%.2f"),
-                        "Final Class": st.column_config.TextColumn("Final Class"),
-                    },
-                    hide_index=True,
-                    use_container_width=True,
+                    if resp.verification.notes:
+                        st.markdown("### ℹ️ Analytical Notes")
+                        for note in resp.verification.notes:
+                            st.info(escape_dollars(str(note)))
+
+                    st.markdown("### 📋 Model Assumptions")
+                    for idx, asm in enumerate(resp.assumptions, start=1):
+                        st.markdown(f"{idx}. {escape_dollars(str(asm))}")
+
+                with tab_inputs:
+                    st.subheader("📥 Extracted Parameters")
+                    filtered_inputs = remove_null_values(resp.inputs_extracted)
+                    st.json(filtered_inputs)
+
+                    conv_notes = [n for n in getattr(resp.verification, "notes", []) if "converted" in str(n).lower() or "risk" in str(n).lower()]
+                    if conv_notes:
+                        st.markdown("### 🔄 Parameter / Time-Unit Conversions")
+                        for cn in conv_notes:
+                            st.info(escape_dollars(cn))
+
+    # -------------------------------------------------------------------------
+    # TAB 2: Inventory Classification (CSV)
+    # -------------------------------------------------------------------------
+    with tab_csv:
+        if uploaded_file is None:
+            st.info("👈 Please upload an inventory CSV file in the sidebar to view multicriteria classification and data analysis.")
+        else:
+            df_raw, missing_cols = process_uploaded_csv(uploaded_file)
+
+            if missing_cols:
+                st.error(
+                    f"❌ **Validation Error**: Missing required column(s): **{', '.join(missing_cols)}**.\n\n"
+                    f"Please ensure your CSV matches either:\n"
+                    f"- **Inventory Classification**: {', '.join(CLASSIFICATION_REQUIRED_COLUMNS)}\n"
+                    f"- **Product Inventory**: {', '.join(REQUIRED_CSV_COLUMNS)}"
                 )
-
-                # Download Classified CSV
-                download_cols = [c for c in display_df.columns if c != "Inventory Class"]
-                csv_bytes = classified_df[download_cols].to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="📥 Download Classified Inventory CSV",
-                    data=csv_bytes,
-                    file_name="classified_inventory_results.csv",
-                    mime="text/csv",
-                    key="download_classified_csv_btn",
-                )
+            elif df_raw is None or df_raw.empty:
+                st.warning("⚠️ The uploaded CSV file is empty. Please upload a CSV containing inventory records.")
             else:
-                # -------------------------------------------------------------
-                # LEGACY PRODUCT INVENTORY ANALYSIS
-                # -------------------------------------------------------------
-                # 1. Dataset Dimensions and Column Names
-                st.subheader("📋 Dataset Overview")
-                col_r, col_c, col_names = st.columns([1, 1, 2])
-                with col_r:
-                    st.metric("Number of Rows", f"{len(df_raw):,}")
-                with col_c:
-                    st.metric("Number of Columns", f"{len(df_raw.columns):,}")
-                with col_names:
-                    st.markdown("**Column Names:**")
-                    st.write(", ".join(list(df_raw.columns)))
+                dataset_type = getattr(df_raw, "attrs", {}).get("dataset_type", "inventory")
+                if dataset_type == "classification" or ("Hits" in df_raw.columns and "Sales ($)" in df_raw.columns):
+                    # ---------------------------------------------------------
+                    # MULTICRITERIA INVENTORY CLASSIFICATION (SALES & HITS)
+                    # ---------------------------------------------------------
+                    st.subheader("📋 Dataset Overview")
+                    col_r, col_c, col_names = st.columns([1, 1, 2])
+                    with col_r:
+                        st.metric("Number of Items", f"{len(df_raw):,}")
+                    with col_c:
+                        st.metric("Number of Columns", f"{len(df_raw.columns):,}")
+                    with col_names:
+                        st.markdown("**Column Names:**")
+                        st.write(", ".join(list(df_raw.columns)))
 
-                # Display uploaded dataframe
-                st.markdown("**Uploaded Dataframe:**")
-                st.dataframe(df_raw, use_container_width=True, hide_index=True)
+                    # Perform multicriteria classification
+                    cls_results = calculate_multicriteria_inventory_classification(df_raw)
+                    classified_df = cls_results["dataframe"]
+                    class_summary_df = cls_results["class_summary_df"]
+                    total_sales = cls_results["total_sales"]
+                    total_hits = cls_results["total_hits"]
+                    total_items = cls_results["total_items"]
 
-                # 2. Data Analysis Calculations
-                metrics = calculate_inventory_dataframe_metrics(df_raw)
+                    st.subheader("🏷️ Multicriteria Inventory Classification Results (A, B, C, D)")
+                    st.caption(
+                        "Classified using **Sales ($)** (Monetary Value / Revenue Velocity) and "
+                        "**Hits** (Picking Frequency / Transaction Velocity)."
+                    )
 
-                st.subheader("📊 Inventory Data Analysis Results")
-                k1, k2, k3, k4 = st.columns(4)
-                with k1:
-                    st.metric("Total Units", f"{metrics['total_units']:,.0f}")
-                with k2:
-                    st.metric("Average Unit Cost", f"${metrics['avg_unit_cost']:,.2f}")
-                with k3:
-                    st.metric("Product with Highest Units", metrics["highest_units_product"])
-                    st.caption(f"{metrics['highest_units_count']:,.0f} units")
-                with k4:
-                    st.metric("Total Inventory Value", f"${metrics['total_inventory_value']:,.2f}")
+                    # Summary Metrics
+                    k1, k2, k3, k4 = st.columns(4)
+                    with k1:
+                        st.metric("Total Items", f"{total_items:,}")
+                    with k2:
+                        st.metric("Total Sales", f"${total_sales:,.2f}")
+                    with k3:
+                        st.metric("Total Activity (Hits)", f"{total_hits:,.0f} picks")
+                    with k4:
+                        cls_a_sub = class_summary_df[class_summary_df["Final Class"] == "A"]
+                        a_items = int(cls_a_sub["Number of Items"].iloc[0]) if not cls_a_sub.empty else 0
+                        a_pct = (a_items / total_items * 100.0) if total_items > 0 else 0.0
+                        st.metric("Class A Items", f"{a_items:,} ({a_pct:.1f}%)")
 
-                # Total Units by Category
-                st.markdown("### 🏷️ Total Units by Category")
-                category_df = metrics["category_units_df"]
-                st.dataframe(
-                    category_df,
-                    column_config={
-                        "Units": st.column_config.NumberColumn("Total Units", format="%d"),
-                    },
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                    # Short Description of BAN 517 Methodology
+                    st.markdown(
+                        """
+                        **BAN 517 Multicriteria Inventory Classification Methodology:**
+                        - **Step 1 (Single-Criterion Pareto Ranking):** Items are sorted from largest to smallest for Sales ($) and Hits separately using a stable sort preserving file order for ties. Each item's class is determined from its exact unrounded cumulative percentage:
+                          - **A**: below 60% (Score = 4)
+                          - **B**: 60% to below 80% (Score = 3)
+                          - **C**: 80% to below 90% (Score = 2)
+                          - **D**: 90% to 100% (Score = 1)
+                          *(Every item receives a class on both criteria; zero sales or hits are not special cases)*
+                        - **Step 2 (Combined Weighted Score):** $\\text{Combined Weighted Score} = 0.65 \\times \\text{Sales Score} + 0.35 \\times \\text{Hits Score}$
+                        - **Step 3 (Final Inventory Class):** The combined score is rounded to 2 decimal places before banding:
+                          - **A**: 3.25 to 4.00
+                          - **B**: 2.50 to 3.24
+                          - **C**: 1.75 to 2.49
+                          - **D**: below 1.75
+                        """
+                    )
 
-                # Dataframe including the new Inventory Value column
-                st.markdown("### 💰 Inventory Dataframe (with Inventory Value Column)")
-                st.caption("New Calculated Column: `Inventory Value = Units × Unit Cost`")
-                df_with_val = metrics["dataframe_with_inventory_value"]
-                st.dataframe(
-                    df_with_val,
-                    column_config={
-                        "Unit Cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
-                        "Inventory Value": st.column_config.NumberColumn("Inventory Value", format="$%.2f"),
-                        "Units": st.column_config.NumberColumn("Units", format="%d"),
-                    },
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                    # Class Breakdown Table
+                    st.markdown("### 📊 Class Summary Breakdown")
+                    summary_display_cols = ["Final Class", "Number of Items", "Total Sales ($)"]
+                    st.dataframe(
+                        class_summary_df[summary_display_cols],
+                        column_config={
+                            "Final Class": st.column_config.TextColumn("Final Class"),
+                            "Number of Items": st.column_config.NumberColumn("Number of Items", format="%d"),
+                            "Total Sales ($)": st.column_config.NumberColumn("Total Sales ($)", format="$%,.2f"),
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
-        st.markdown("---")
+                    # Classified Inventory Items Table
+                    st.markdown("### 📋 Classified Inventory Dataframe")
+                    col_filt, col_info = st.columns([1, 2])
+                    with col_filt:
+                        filter_class = st.selectbox(
+                            "Filter by Final Class:",
+                            ["All Items", "Class A", "Class B", "Class C", "Class D"],
+                            index=0,
+                            key="filter_class_select",
+                        )
 
-    # -------------------------------------------------------------------------
-    # Question Input & Trigger Controls
-    # -------------------------------------------------------------------------
-    query = st.text_area(
-        "Enter your natural language inventory question:",
-        height=100,
-        placeholder="e.g., Annual demand is 5000, setup cost is $40, supplier price breaks are...",
-        key="query_text_area",
-    )
-    st.session_state["current_question"] = query
+                    display_df = classified_df.copy()
+                    if filter_class != "All Items":
+                        target_cls = filter_class.replace("Class ", "")
+                        display_df = display_df[display_df["Final Class"] == target_cls]
 
-    col_btn1, col_btn2 = st.columns([1, 5])
-    with col_btn1:
-        run_btn = st.button("🚀 Analyze & Optimize", type="primary", use_container_width=True)
+                    # Select and order columns: original columns + added columns
+                    standard_cols = [
+                        "Item Number",
+                        "Item Name",
+                        "UoM",
+                        "Sales ($)",
+                        "Sales Cumulative %",
+                        "Sales Class",
+                        "Sales Score",
+                        "Hits",
+                        "Hits Cumulative %",
+                        "Hits Class",
+                        "Hits Score",
+                        "Combined Weighted Score",
+                        "Final Class",
+                    ]
+                    display_cols = [c for c in standard_cols if c in display_df.columns]
+                    extra_cols = [c for c in display_df.columns if c not in display_cols and c != "Inventory Class"]
+                    final_col_order = extra_cols + display_cols
 
-    # Execute analysis only when requested (button click or new benchmark selected)
-    if run_btn or benchmark_selected:
-        with st.spinner("Executing 6-Stage Inventory Pipeline..."):
-            st.session_state["latest_response"] = agent.process_question(st.session_state["current_question"])
+                    st.dataframe(
+                        display_df[final_col_order],
+                        column_config={
+                            "Sales ($)": st.column_config.NumberColumn("Sales ($)", format="$%,.2f"),
+                            "Sales Cumulative %": st.column_config.NumberColumn("Sales Cumulative %", format="%.2f%%"),
+                            "Sales Score": st.column_config.NumberColumn("Sales Score", format="%d"),
+                            "Hits": st.column_config.NumberColumn("Hits", format="%d"),
+                            "Hits Cumulative %": st.column_config.NumberColumn("Hits Cumulative %", format="%.2f%%"),
+                            "Hits Score": st.column_config.NumberColumn("Hits Score", format="%d"),
+                            "Combined Weighted Score": st.column_config.NumberColumn("Combined Weighted Score", format="%.2f"),
+                            "Final Class": st.column_config.TextColumn("Final Class"),
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
-    resp: Optional[AgentResponse] = st.session_state.get("latest_response")
-
-    # -------------------------------------------------------------------------
-    # Results Display
-    # -------------------------------------------------------------------------
-    if resp is not None:
-        # Status Message 1: Unused values yellow warning banner above results
-        if resp.unused_values:
-            unused_items = []
-            for u in resp.unused_values:
-                if hasattr(u, "context") and u.context:
-                    val_repr = getattr(u, "_int_or_float", u)
-                    unused_items.append(f"{val_repr} (in '{u.context}')")
+                    # Download Classified CSV
+                    download_cols = [c for c in display_df.columns if c != "Inventory Class"]
+                    csv_bytes = classified_df[download_cols].to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label="📥 Download Classified Inventory CSV",
+                        data=csv_bytes,
+                        file_name="classified_inventory_results.csv",
+                        mime="text/csv",
+                        key="download_classified_csv_btn",
+                    )
                 else:
-                    unused_items.append(str(u))
-            st.warning(f"⚠️ **Warning: these values from your question were not used in the calculation:** {escape_dollars(', '.join(unused_items))}")
+                    # ---------------------------------------------------------
+                    # LEGACY PRODUCT INVENTORY ANALYSIS
+                    # ---------------------------------------------------------
+                    # 1. Dataset Dimensions and Column Names
+                    st.subheader("📋 Dataset Overview")
+                    col_r, col_c, col_names = st.columns([1, 1, 2])
+                    with col_r:
+                        st.metric("Number of Rows", f"{len(df_raw):,}")
+                    with col_c:
+                        st.metric("Number of Columns", f"{len(df_raw.columns):,}")
+                    with col_names:
+                        st.markdown("**Column Names:**")
+                        st.write(", ".join(list(df_raw.columns)))
 
-        # Status Message 2: Missing inputs error message (no result cards)
-        if resp.missing_inputs:
-            st.error(
-                f"⚠️ **Clarification Needed for {resp.model_name} Model**\n\n"
-                f"I identified that your question relates to **{resp.model_name}** "
-                f"(Match Strength: {resp.confidence * 100:.0f}%), but the following required parameter(s) are missing:\n\n"
-                + "\n".join([f"- **{m}**" for m in resp.missing_inputs]) + "\n\n"
-                f"Please provide these values so I can execute the exact calculation."
-            )
-            if resp.extracted_inputs:
-                with st.expander("📥 Parameters Extracted So Far", expanded=True):
-                    st.json(resp.extracted_inputs)
-            return
+                    # Display uploaded dataframe
+                    st.markdown("**Uploaded Dataframe:**")
+                    st.dataframe(df_raw, use_container_width=True, hide_index=True)
 
-        # Status Message 3: Unsupported model info message (no result cards)
-        if resp.model_name in ("unsupported", InventoryAgent.MODEL_UNSUPPORTED):
-            st.info(
-                "❓ **Unsupported Question**\n\n"
-                "I could not match your question to any of the 5 supported inventory decision models. "
-                "The supported inventory models are:\n\n"
-                "1. **Economic Order Quantity (EOQ)**: Classical Wilson lot-sizing for constant demand under ordering/setup and holding cost trade-offs.\n"
-                "2. **Quantity Discount**: All-units price-break analysis evaluating feasible batch sizes and total annual acquisition and inventory costs.\n"
-                "3. **Safety Stock and Reorder Point (ROP)**: Continuous review (s, Q) replenishment policy under demand and/or lead-time variability.\n"
-                "4. **Fixed-Period Review**: Periodic review (T, S) order-up-to base-stock replenishment policy for fixed review intervals.\n"
-                "5. **Newsvendor**: Single-period stochastic inventory optimization for seasonal or perishable products with underage and overage risks.\n\n"
-                "Please rephrase your question using relevant parameters from one of these models."
-            )
-            return
+                    # 2. Data Analysis Calculations
+                    metrics = calculate_inventory_dataframe_metrics(df_raw)
 
-        # Pipeline status cards (Match Strength renamed with tooltip)
-        st.subheader("🔍 Execution Pipeline Inspection")
-        with st.container(key="inspection_pipeline"):
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                display_model_name = MODEL_DISPLAY_NAMES.get(resp.model_name, resp.model_name)
-                st.metric("Identified Model", display_model_name)
-            with c2:
-                st.metric(
-                    "Match Strength",
-                    f"{resp.confidence * 100:.0f}%",
-                    help="How strongly the wording matched this model's keywords. Not a probability.",
-                )
-            with c3:
-                st.metric("Python Tool", resp.tool_name)
-            with c4:
-                status_label = "✅ Verified" if resp.verification.passed else "⚠️ Attention"
-                st.metric("Verification", status_label)
+                    st.subheader("📊 Inventory Data Analysis Results")
+                    k1, k2, k3, k4 = st.columns(4)
+                    with k1:
+                        st.metric("Total Units", f"{metrics['total_units']:,.0f}")
+                    with k2:
+                        st.metric("Average Unit Cost", f"${metrics['avg_unit_cost']:,.2f}")
+                    with k3:
+                        st.metric("Product with Highest Units", metrics["highest_units_product"])
+                        st.caption(f"{metrics['highest_units_count']:,.0f} units")
+                    with k4:
+                        st.metric("Total Inventory Value", f"${metrics['total_inventory_value']:,.2f}")
 
-        # Four distinct tabs without duplication
-        tab_summary, tab_student, tab_checks, tab_inputs = st.tabs([
-            "Summary",
-            "Step-by-Step Verification",
-            "Checks",
-            "Inputs",
-        ])
+                    # Total Units by Category
+                    st.markdown("### 🏷️ Total Units by Category")
+                    category_df = metrics["category_units_df"]
+                    st.dataframe(
+                        category_df,
+                        column_config={
+                            "Units": st.column_config.NumberColumn("Total Units", format="%d"),
+                        },
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
-        with tab_summary:
-            # Answer first: Key results as large metric cards
-            st.subheader("🎯 Key Decision Results")
-            metric_cards = get_model_metric_cards(resp)
-            if metric_cards:
-                mc_cols = st.columns(len(metric_cards))
-                for idx, (lbl, val) in enumerate(metric_cards):
-                    with mc_cols[idx]:
-                        st.metric(lbl, escape_dollars(val))
-
-            # Two or three sentence plain-language recommendation
-            st.markdown("### 💡 Plain-Language Recommendation")
-            recommendation = get_plain_language_recommendation(resp)
-            st.info(escape_dollars(recommendation))
-
-            # One chart per model in Summary tab built from calculation tool values
-            chart_tuple = build_model_chart(resp)
-            if chart_tuple is not None:
-                chart_obj, chart_caption, opt_table_df = chart_tuple
-                st.markdown("### 📈 Visual Decision Analysis")
-                st.altair_chart(chart_obj, use_container_width=True, theme="streamlit")
-                st.caption(escape_dollars(chart_caption))
-                if opt_table_df is not None:
-                    st.markdown("#### 📋 Price Break Tier Comparison Table")
-                    st.dataframe(opt_table_df, use_container_width=True, hide_index=True)
-
-            # Download report button: downloads full report as Markdown named after model and date
-            st.markdown("---")
-            model_slug = resp.model_name.lower().replace(" ", "_").replace("/", "_")
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            report_filename = f"{model_slug}_report_{date_str}.md"
-            st.download_button(
-                label="📥 Download Report",
-                data=resp.explanation,
-                file_name=report_filename,
-                mime="text/markdown",
-                use_container_width=False,
-                key="download_report_btn",
-            )
-
-        with tab_student:
-            st.markdown("## 🎓 Step-by-Step Verification")
-            st.caption("All calculation steps below originate deterministically from Python operations research tools.")
-            report_lines = [
-                line for line in agent._format_verification_report(resp.model_name, resp.calculation_result, resp.verification)
-                if "Student Verification Report" not in line
-            ]
-            report_md = "\n".join(report_lines)
-            st.markdown(escape_dollars(report_md))
-
-        with tab_checks:
-            st.subheader("🛡️ Verification Checks & Mathematical Validation")
-            checks_list = getattr(resp.calculation_result, "verification_checks", []) or resp.verification.checks
-            for chk in checks_list:
-                chk_str = escape_dollars(str(chk))
-                if "FAIL" in str(chk):
-                    st.error(f"❌ {chk_str}")
-                else:
-                    st.success(f"✅ {chk_str}")
-
-            if resp.verification.notes:
-                st.markdown("### ℹ️ Analytical Notes")
-                for note in resp.verification.notes:
-                    st.info(escape_dollars(str(note)))
-
-            st.markdown("### 📋 Model Assumptions")
-            for idx, asm in enumerate(resp.assumptions, start=1):
-                st.markdown(f"{idx}. {escape_dollars(str(asm))}")
-
-        with tab_inputs:
-            st.subheader("📥 Extracted Parameters")
-            filtered_inputs = remove_null_values(resp.inputs_extracted)
-            st.json(filtered_inputs)
-
-            conv_notes = [n for n in getattr(resp.verification, "notes", []) if "converted" in str(n).lower() or "risk" in str(n).lower()]
-            if conv_notes:
-                st.markdown("### 🔄 Parameter / Time-Unit Conversions")
-                for cn in conv_notes:
-                    st.info(escape_dollars(cn))
+                    # Dataframe including the new Inventory Value column
+                    st.markdown("### 💰 Inventory Dataframe (with Inventory Value Column)")
+                    st.caption("New Calculated Column: `Inventory Value = Units × Unit Cost`")
+                    df_with_val = metrics["dataframe_with_inventory_value"]
+                    st.dataframe(
+                        df_with_val,
+                        column_config={
+                            "Unit Cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+                            "Inventory Value": st.column_config.NumberColumn("Inventory Value", format="$%.2f"),
+                            "Units": st.column_config.NumberColumn("Units", format="%d"),
+                        },
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
 
 # =============================================================================
