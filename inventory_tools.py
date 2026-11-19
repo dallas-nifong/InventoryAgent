@@ -1879,3 +1879,177 @@ def calculate_newsvendor(
         stockout_probability=1.0 - critical_ratio,
         demand_table=demand_table,
     )
+
+
+# =============================================================================
+# MULTICRITERIA INVENTORY CLASSIFICATION (SALES & HITS)
+# =============================================================================
+
+def calculate_multicriteria_inventory_classification(
+    df: Any,
+    sales_col: str = "Sales ($)",
+    hits_col: str = "Hits",
+    item_num_col: str = "Item Number",
+    item_name_col: str = "Item Name",
+    uom_col: str = "UoM",
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """
+    Perform multicriteria inventory classification using the BAN 517 Methodology:
+    
+    Step 1. Single-Criterion Pareto Ranking for Sales ($) and Hits separately:
+      - Sort items from largest to smallest using a stable sort (preserving file order on ties).
+      - Compute running cumulative total including the item divided by the grand total (exact unrounded cumulative percent):
+        * A: below 60%
+        * B: 60% to below 80%
+        * C: 80% to below 90%
+        * D: 90% to 100%
+      - Zero sales or zero hits are not treated as special cases (every item gets A, B, C, or D).
+      - Convert classes to scores: A = 4, B = 3, C = 2, D = 1.
+    
+    Step 2. Combined Weighted Score:
+      - Combined Weighted Score = 0.65 * Sales Score + 0.35 * Hits Score
+    
+    Step 3. Final Inventory Class:
+      - Round the combined score to 2 decimal places before banding:
+        * A: 3.25 to 4.00
+        * B: 2.50 to 3.24
+        * C: 1.75 to 2.49
+        * D: below 1.75
+
+    Returns:
+        Dictionary containing:
+        - 'dataframe': Enhanced DataFrame with BAN 517 classification columns.
+        - 'class_summary_df': Summary table with rows A, B, C, D and Total.
+        - 'total_items': Total item count.
+        - 'total_sales': Total sales ($).
+        - 'total_hits': Total hits.
+    """
+    import pandas as pd
+
+    df_calc = df.copy()
+
+    # Column name resolution if aliases are present
+    if sales_col not in df_calc.columns:
+        for c in df_calc.columns:
+            if str(c).strip().lower() in ["sales", "revenue", "annual sales", "sales_usd"]:
+                sales_col = c
+                break
+    if hits_col not in df_calc.columns:
+        for c in df_calc.columns:
+            if str(c).strip().lower() in ["hit", "hit count", "picks", "frequency", "orders"]:
+                hits_col = c
+                break
+
+    # Clean numeric data
+    if sales_col in df_calc.columns:
+        if not pd.api.types.is_numeric_dtype(df_calc[sales_col]):
+            df_calc[sales_col] = pd.to_numeric(
+                df_calc[sales_col].astype(str).str.replace("$", "", regex=False).str.replace(",", "", regex=False).str.strip(),
+                errors="coerce",
+            ).fillna(0.0)
+        else:
+            df_calc[sales_col] = pd.to_numeric(df_calc[sales_col], errors="coerce").fillna(0.0)
+    else:
+        df_calc[sales_col] = 0.0
+
+    if hits_col in df_calc.columns:
+        if not pd.api.types.is_numeric_dtype(df_calc[hits_col]):
+            df_calc[hits_col] = pd.to_numeric(
+                df_calc[hits_col].astype(str).str.replace(",", "", regex=False).str.strip(),
+                errors="coerce",
+            ).fillna(0.0)
+        else:
+            df_calc[hits_col] = pd.to_numeric(df_calc[hits_col], errors="coerce").fillna(0.0)
+    else:
+        df_calc[hits_col] = 0.0
+
+    total_sales = float(df_calc[sales_col].sum())
+    total_hits = float(df_calc[hits_col].sum())
+    total_items = len(df_calc)
+
+    score_map = {"A": 4, "B": 3, "C": 2, "D": 1}
+
+    def assign_pareto_class(cum_pct: float) -> str:
+        if cum_pct < 60.0:
+            return "A"
+        elif cum_pct < 80.0:
+            return "B"
+        elif cum_pct < 90.0:
+            return "C"
+        else:
+            return "D"
+
+    # Step 1: Sales Pareto Ranking (Stable sort preserving original file order for ties)
+    sales_sorted = df_calc.sort_values(by=sales_col, ascending=False, kind="mergesort")
+    sales_cumsum = sales_sorted[sales_col].cumsum()
+    sales_cum_pct = (sales_cumsum / total_sales * 100.0) if total_sales > 0 else 0.0
+    sales_classes = sales_cum_pct.apply(assign_pareto_class)
+    sales_scores = sales_classes.map(score_map)
+
+    df_calc["Sales Cumulative %"] = sales_cum_pct.round(2).reindex(df_calc.index)
+    df_calc["Sales Class"] = sales_classes.reindex(df_calc.index)
+    df_calc["Sales Score"] = sales_scores.reindex(df_calc.index)
+
+    # Step 1: Hits Pareto Ranking (Stable sort preserving original file order for ties)
+    hits_sorted = df_calc.sort_values(by=hits_col, ascending=False, kind="mergesort")
+    hits_cumsum = hits_sorted[hits_col].cumsum()
+    hits_cum_pct = (hits_cumsum / total_hits * 100.0) if total_hits > 0 else 0.0
+    hits_classes = hits_cum_pct.apply(assign_pareto_class)
+    hits_scores = hits_classes.map(score_map)
+
+    df_calc["Hits Cumulative %"] = hits_cum_pct.round(2).reindex(df_calc.index)
+    df_calc["Hits Class"] = hits_classes.reindex(df_calc.index)
+    df_calc["Hits Score"] = hits_scores.reindex(df_calc.index)
+
+    # Step 2: Combine Sales and Hits into a Combined Weighted Score
+    # Round the combined score to 2 decimal places before banding
+    combined_scores = (0.65 * df_calc["Sales Score"] + 0.35 * df_calc["Hits Score"]).round(2)
+    df_calc["Combined Weighted Score"] = combined_scores
+
+    # Step 3: Final Inventory Class
+    def assign_final_class(score: float) -> str:
+        if score >= 3.25:
+            return "A"
+        elif score >= 2.50:
+            return "B"
+        elif score >= 1.75:
+            return "C"
+        else:
+            return "D"
+
+    final_classes = df_calc["Combined Weighted Score"].apply(assign_final_class)
+    df_calc["Final Class"] = final_classes
+    df_calc["Inventory Class"] = final_classes  # Compatibility alias
+
+    # Summary table: one row per final class (A, B, C, D) showing number of items and total Sales ($), plus a Total row.
+    summary_rows = []
+    for cls in ["A", "B", "C", "D"]:
+        sub = df_calc[df_calc["Final Class"] == cls]
+        cnt = len(sub)
+        cls_sales = float(sub[sales_col].sum())
+        summary_rows.append({
+            "Final Class": cls,
+            "Class": cls,
+            "Number of Items": cnt,
+            "Items": cnt,
+            "Total Sales ($)": cls_sales,
+        })
+
+    summary_rows.append({
+        "Final Class": "Total",
+        "Class": "Total",
+        "Number of Items": total_items,
+        "Items": total_items,
+        "Total Sales ($)": total_sales,
+    })
+
+    class_summary_df = pd.DataFrame(summary_rows)
+
+    return {
+        "dataframe": df_calc,
+        "class_summary_df": class_summary_df,
+        "total_items": total_items,
+        "total_sales": total_sales,
+        "total_hits": total_hits,
+    }

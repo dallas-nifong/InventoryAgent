@@ -26,6 +26,7 @@ except ImportError:
 
 from inventory_agent import AgentResponse, InventoryAgent
 from chart_helpers import build_model_chart
+from inventory_tools import calculate_multicriteria_inventory_classification
 
 
 # =============================================================================
@@ -139,17 +140,25 @@ def run_cli_interactive(agent: InventoryAgent):
 # =============================================================================
 
 REQUIRED_CSV_COLUMNS = ["Product", "Category", "Units", "Unit Cost"]
+CLASSIFICATION_REQUIRED_COLUMNS = ["Item Number", "Item Name", "UoM", "Sales ($)", "Hits"]
 
 
 def process_uploaded_csv(file_or_buffer: Any) -> Tuple[Optional[Any], List[str]]:
     """
     Read an uploaded CSV file into a pandas DataFrame and validate required columns.
 
-    Required columns:
-    - Product
-    - Category
-    - Units
-    - Unit Cost
+    Supports two schemas:
+    1. Inventory Classification Schema:
+       - Item Number
+       - Item Name
+       - UoM
+       - Sales ($)
+       - Hits
+    2. Legacy Product Inventory Schema:
+       - Product
+       - Category
+       - Units
+       - Unit Cost
 
     Returns:
         Tuple of (dataframe, missing_columns_list)
@@ -166,32 +175,89 @@ def process_uploaded_csv(file_or_buffer: Any) -> Tuple[Optional[Any], List[str]]
     # Clean whitespace in column names if any
     df.columns = [str(col).strip() for col in df.columns]
 
-    missing = [col for col in REQUIRED_CSV_COLUMNS if col not in df.columns]
+    # Normalize common column name aliases for classification
+    col_map = {}
+    for c in df.columns:
+        c_clean = str(c).strip()
+        c_lower = c_clean.lower()
+        if c_clean not in CLASSIFICATION_REQUIRED_COLUMNS:
+            if c_lower in ["sales", "revenue", "annual sales", "sales_usd"]:
+                col_map[c] = "Sales ($)"
+            elif c_lower in ["hit", "hit count", "picks", "frequency", "orders"]:
+                col_map[c] = "Hits"
+            elif c_lower in ["item no", "item_number", "item #", "sku", "part number", "item_no"]:
+                col_map[c] = "Item Number"
+            elif c_lower in ["item description", "description", "product name"]:
+                col_map[c] = "Item Name"
+            elif c_lower in ["uom", "unit of measure", "unit"]:
+                col_map[c] = "UoM"
+    if col_map:
+        df = df.rename(columns=col_map)
+
+    # Detect schema based on column matches
+    cls_matches = sum(1 for c in CLASSIFICATION_REQUIRED_COLUMNS if c in df.columns)
+    inv_matches = sum(1 for c in REQUIRED_CSV_COLUMNS if c in df.columns)
+
+    if cls_matches >= 2 and cls_matches >= inv_matches:
+        schema = "classification"
+        missing = [col for col in CLASSIFICATION_REQUIRED_COLUMNS if col not in df.columns]
+    else:
+        schema = "inventory"
+        missing = [col for col in REQUIRED_CSV_COLUMNS if col not in df.columns]
+
+    df.attrs["dataset_type"] = schema
     if missing:
         return df, missing
 
-    # Coerce numeric columns cleanly without dropping valid rows
-    if "Units" in df.columns:
-        if not pd.api.types.is_numeric_dtype(df["Units"]):
-            df["Units"] = pd.to_numeric(
-                df["Units"].astype(str).str.replace(",", "", regex=False).str.strip(),
-                errors="coerce",
-            )
-        else:
-            df["Units"] = pd.to_numeric(df["Units"], errors="coerce")
+    if schema == "classification":
+        # Coerce numeric columns for classification
+        if "Sales ($)" in df.columns:
+            if not pd.api.types.is_numeric_dtype(df["Sales ($)"]):
+                df["Sales ($)"] = pd.to_numeric(
+                    df["Sales ($)"]
+                    .astype(str)
+                    .str.replace("$", "", regex=False)
+                    .str.replace(",", "", regex=False)
+                    .str.strip(),
+                    errors="coerce",
+                ).fillna(0.0)
+            else:
+                df["Sales ($)"] = pd.to_numeric(df["Sales ($)"], errors="coerce").fillna(0.0)
 
-    if "Unit Cost" in df.columns:
-        if not pd.api.types.is_numeric_dtype(df["Unit Cost"]):
-            df["Unit Cost"] = pd.to_numeric(
-                df["Unit Cost"]
-                .astype(str)
-                .str.replace("$", "", regex=False)
-                .str.replace(",", "", regex=False)
-                .str.strip(),
-                errors="coerce",
-            )
-        else:
-            df["Unit Cost"] = pd.to_numeric(df["Unit Cost"], errors="coerce")
+        if "Hits" in df.columns:
+            if not pd.api.types.is_numeric_dtype(df["Hits"]):
+                df["Hits"] = pd.to_numeric(
+                    df["Hits"]
+                    .astype(str)
+                    .str.replace(",", "", regex=False)
+                    .str.strip(),
+                    errors="coerce",
+                ).fillna(0.0)
+            else:
+                df["Hits"] = pd.to_numeric(df["Hits"], errors="coerce").fillna(0.0)
+    else:
+        # Coerce numeric columns cleanly without dropping valid rows for legacy inventory
+        if "Units" in df.columns:
+            if not pd.api.types.is_numeric_dtype(df["Units"]):
+                df["Units"] = pd.to_numeric(
+                    df["Units"].astype(str).str.replace(",", "", regex=False).str.strip(),
+                    errors="coerce",
+                )
+            else:
+                df["Units"] = pd.to_numeric(df["Units"], errors="coerce")
+
+        if "Unit Cost" in df.columns:
+            if not pd.api.types.is_numeric_dtype(df["Unit Cost"]):
+                df["Unit Cost"] = pd.to_numeric(
+                    df["Unit Cost"]
+                    .astype(str)
+                    .str.replace("$", "", regex=False)
+                    .str.replace(",", "", regex=False)
+                    .str.strip(),
+                    errors="coerce",
+                )
+            else:
+                df["Unit Cost"] = pd.to_numeric(df["Unit Cost"], errors="coerce")
 
     return df, []
 
@@ -545,7 +611,7 @@ def run_streamlit_app():
         uploaded_file = st.file_uploader(
             "Upload CSV File",
             type=["csv"],
-            help="Upload a CSV file containing: Product, Category, Units, Unit Cost",
+            help="Upload a CSV file containing: Item Number, Item Name, UoM, Sales ($), Hits (for classification) or Product, Category, Units, Unit Cost (for inventory analysis)",
         )
 
         # 3. Supported Models (Collapsed expander)
@@ -583,65 +649,211 @@ def run_streamlit_app():
         if missing_cols:
             st.error(
                 f"❌ **Validation Error**: Missing required column(s): **{', '.join(missing_cols)}**.\n\n"
-                f"The CSV file must contain the following required columns: **{', '.join(REQUIRED_CSV_COLUMNS)}**."
+                f"Please ensure your CSV matches either:\n"
+                f"- **Inventory Classification**: {', '.join(CLASSIFICATION_REQUIRED_COLUMNS)}\n"
+                f"- **Product Inventory**: {', '.join(REQUIRED_CSV_COLUMNS)}"
             )
         elif df_raw is None or df_raw.empty:
-            st.warning("⚠️ The uploaded CSV file is empty. Please upload a CSV containing product inventory records.")
+            st.warning("⚠️ The uploaded CSV file is empty. Please upload a CSV containing inventory records.")
         else:
-            # 1. Dataset Dimensions and Column Names
-            st.subheader("📋 Dataset Overview")
-            col_r, col_c, col_names = st.columns([1, 1, 2])
-            with col_r:
-                st.metric("Number of Rows", f"{len(df_raw):,}")
-            with col_c:
-                st.metric("Number of Columns", f"{len(df_raw.columns):,}")
-            with col_names:
-                st.markdown("**Column Names:**")
-                st.write(", ".join(list(df_raw.columns)))
+            dataset_type = getattr(df_raw, "attrs", {}).get("dataset_type", "inventory")
+            if dataset_type == "classification" or ("Hits" in df_raw.columns and "Sales ($)" in df_raw.columns):
+                # -------------------------------------------------------------
+                # MULTICRITERIA INVENTORY CLASSIFICATION (SALES & HITS)
+                # -------------------------------------------------------------
+                st.subheader("📋 Dataset Overview")
+                col_r, col_c, col_names = st.columns([1, 1, 2])
+                with col_r:
+                    st.metric("Number of Items", f"{len(df_raw):,}")
+                with col_c:
+                    st.metric("Number of Columns", f"{len(df_raw.columns):,}")
+                with col_names:
+                    st.markdown("**Column Names:**")
+                    st.write(", ".join(list(df_raw.columns)))
 
-            # Display uploaded dataframe
-            st.markdown("**Uploaded Dataframe:**")
-            st.dataframe(df_raw, use_container_width=True)
+                # Perform multicriteria classification
+                cls_results = calculate_multicriteria_inventory_classification(df_raw)
+                classified_df = cls_results["dataframe"]
+                class_summary_df = cls_results["class_summary_df"]
+                total_sales = cls_results["total_sales"]
+                total_hits = cls_results["total_hits"]
+                total_items = cls_results["total_items"]
 
-            # 2. Data Analysis Calculations
-            metrics = calculate_inventory_dataframe_metrics(df_raw)
+                st.subheader("🏷️ Multicriteria Inventory Classification Results (A, B, C, D)")
+                st.caption(
+                    "Classified using **Sales ($)** (Monetary Value / Revenue Velocity) and "
+                    "**Hits** (Picking Frequency / Transaction Velocity)."
+                )
 
-            st.subheader("📊 Inventory Data Analysis Results")
-            k1, k2, k3, k4 = st.columns(4)
-            with k1:
-                st.metric("Total Units", f"{metrics['total_units']:,.0f}")
-            with k2:
-                st.metric("Average Unit Cost", f"${metrics['avg_unit_cost']:,.2f}")
-            with k3:
-                st.metric("Product with Highest Units", metrics["highest_units_product"])
-                st.caption(f"{metrics['highest_units_count']:,.0f} units")
-            with k4:
-                st.metric("Total Inventory Value", f"${metrics['total_inventory_value']:,.2f}")
+                # Summary Metrics
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Total Items", f"{total_items:,}")
+                with k2:
+                    st.metric("Total Sales", f"${total_sales:,.2f}")
+                with k3:
+                    st.metric("Total Activity (Hits)", f"{total_hits:,.0f} picks")
+                with k4:
+                    cls_a_sub = class_summary_df[class_summary_df["Final Class"] == "A"]
+                    a_items = int(cls_a_sub["Number of Items"].iloc[0]) if not cls_a_sub.empty else 0
+                    a_pct = (a_items / total_items * 100.0) if total_items > 0 else 0.0
+                    st.metric("Class A Fast Movers", f"{a_items:,} ({a_pct:.1f}%)")
 
-            # Total Units by Category
-            st.markdown("### 🏷️ Total Units by Category")
-            category_df = metrics["category_units_df"]
-            st.dataframe(
-                category_df,
-                column_config={
-                    "Units": st.column_config.NumberColumn("Total Units", format="%d"),
-                },
-                use_container_width=True,
-            )
+                # Short Description of BAN 517 Methodology
+                st.markdown(
+                    """
+                    **BAN 517 Multicriteria Inventory Classification Methodology:**
+                    - **Step 1 (Single-Criterion Pareto Ranking):** Items are sorted from largest to smallest for Sales ($) and Hits separately using a stable sort preserving file order for ties. Each item's class is determined from its exact unrounded cumulative percentage:
+                      - **A**: below 60% (Score = 4)
+                      - **B**: 60% to below 80% (Score = 3)
+                      - **C**: 80% to below 90% (Score = 2)
+                      - **D**: 90% to 100% (Score = 1)
+                      *(Every item receives a class on both criteria; zero sales or hits are not special cases)*
+                    - **Step 2 (Combined Weighted Score):** $\\text{Combined Weighted Score} = 0.65 \\times \\text{Sales Score} + 0.35 \\times \\text{Hits Score}$
+                    - **Step 3 (Final Inventory Class):** The combined score is rounded to 2 decimal places before banding:
+                      - **A**: 3.25 to 4.00
+                      - **B**: 2.50 to 3.24
+                      - **C**: 1.75 to 2.49
+                      - **D**: below 1.75
+                    """
+                )
 
-            # Dataframe including the new Inventory Value column
-            st.markdown("### 💰 Inventory Dataframe (with Inventory Value Column)")
-            st.caption("New Calculated Column: `Inventory Value = Units × Unit Cost`")
-            df_with_val = metrics["dataframe_with_inventory_value"]
-            st.dataframe(
-                df_with_val,
-                column_config={
-                    "Unit Cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
-                    "Inventory Value": st.column_config.NumberColumn("Inventory Value", format="$%.2f"),
-                    "Units": st.column_config.NumberColumn("Units", format="%d"),
-                },
-                use_container_width=True,
-            )
+                # Class Breakdown Table
+                st.markdown("### 📊 Class Summary Breakdown")
+                summary_display_cols = ["Final Class", "Number of Items", "Total Sales ($)"]
+                st.dataframe(
+                    class_summary_df[summary_display_cols],
+                    column_config={
+                        "Final Class": st.column_config.TextColumn("Final Class"),
+                        "Number of Items": st.column_config.NumberColumn("Number of Items", format="%d"),
+                        "Total Sales ($)": st.column_config.NumberColumn("Total Sales ($)", format="$%,.2f"),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+                # Classified Inventory Items Table
+                st.markdown("### 📋 Classified Inventory Dataframe")
+                col_filt, col_info = st.columns([1, 2])
+                with col_filt:
+                    filter_class = st.selectbox(
+                        "Filter by Final Class:",
+                        ["All Items", "Class A", "Class B", "Class C", "Class D"],
+                        index=0,
+                        key="filter_class_select",
+                    )
+
+                display_df = classified_df.copy()
+                if filter_class != "All Items":
+                    target_cls = filter_class.replace("Class ", "")
+                    display_df = display_df[display_df["Final Class"] == target_cls]
+
+                # Select and order columns: original columns + added columns
+                standard_cols = [
+                    "Item Number",
+                    "Item Name",
+                    "UoM",
+                    "Sales ($)",
+                    "Sales Cumulative %",
+                    "Sales Class",
+                    "Sales Score",
+                    "Hits",
+                    "Hits Cumulative %",
+                    "Hits Class",
+                    "Hits Score",
+                    "Combined Weighted Score",
+                    "Final Class",
+                ]
+                display_cols = [c for c in standard_cols if c in display_df.columns]
+                extra_cols = [c for c in display_df.columns if c not in display_cols and c != "Inventory Class"]
+                final_col_order = extra_cols + display_cols
+
+                st.dataframe(
+                    display_df[final_col_order],
+                    column_config={
+                        "Sales ($)": st.column_config.NumberColumn("Sales ($)", format="$%,.2f"),
+                        "Sales Cumulative %": st.column_config.NumberColumn("Sales Cumulative %", format="%.2f%%"),
+                        "Sales Score": st.column_config.NumberColumn("Sales Score", format="%d"),
+                        "Hits": st.column_config.NumberColumn("Hits", format="%d"),
+                        "Hits Cumulative %": st.column_config.NumberColumn("Hits Cumulative %", format="%.2f%%"),
+                        "Hits Score": st.column_config.NumberColumn("Hits Score", format="%d"),
+                        "Combined Weighted Score": st.column_config.NumberColumn("Combined Weighted Score", format="%.2f"),
+                        "Final Class": st.column_config.TextColumn("Final Class"),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+                # Download Classified CSV
+                download_cols = [c for c in display_df.columns if c != "Inventory Class"]
+                csv_bytes = classified_df[download_cols].to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="📥 Download Classified Inventory CSV",
+                    data=csv_bytes,
+                    file_name="classified_inventory_results.csv",
+                    mime="text/csv",
+                    key="download_classified_csv_btn",
+                )
+            else:
+                # -------------------------------------------------------------
+                # LEGACY PRODUCT INVENTORY ANALYSIS
+                # -------------------------------------------------------------
+                # 1. Dataset Dimensions and Column Names
+                st.subheader("📋 Dataset Overview")
+                col_r, col_c, col_names = st.columns([1, 1, 2])
+                with col_r:
+                    st.metric("Number of Rows", f"{len(df_raw):,}")
+                with col_c:
+                    st.metric("Number of Columns", f"{len(df_raw.columns):,}")
+                with col_names:
+                    st.markdown("**Column Names:**")
+                    st.write(", ".join(list(df_raw.columns)))
+
+                # Display uploaded dataframe
+                st.markdown("**Uploaded Dataframe:**")
+                st.dataframe(df_raw, use_container_width=True, hide_index=True)
+
+                # 2. Data Analysis Calculations
+                metrics = calculate_inventory_dataframe_metrics(df_raw)
+
+                st.subheader("📊 Inventory Data Analysis Results")
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Total Units", f"{metrics['total_units']:,.0f}")
+                with k2:
+                    st.metric("Average Unit Cost", f"${metrics['avg_unit_cost']:,.2f}")
+                with k3:
+                    st.metric("Product with Highest Units", metrics["highest_units_product"])
+                    st.caption(f"{metrics['highest_units_count']:,.0f} units")
+                with k4:
+                    st.metric("Total Inventory Value", f"${metrics['total_inventory_value']:,.2f}")
+
+                # Total Units by Category
+                st.markdown("### 🏷️ Total Units by Category")
+                category_df = metrics["category_units_df"]
+                st.dataframe(
+                    category_df,
+                    column_config={
+                        "Units": st.column_config.NumberColumn("Total Units", format="%d"),
+                    },
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # Dataframe including the new Inventory Value column
+                st.markdown("### 💰 Inventory Dataframe (with Inventory Value Column)")
+                st.caption("New Calculated Column: `Inventory Value = Units × Unit Cost`")
+                df_with_val = metrics["dataframe_with_inventory_value"]
+                st.dataframe(
+                    df_with_val,
+                    column_config={
+                        "Unit Cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+                        "Inventory Value": st.column_config.NumberColumn("Inventory Value", format="$%.2f"),
+                        "Units": st.column_config.NumberColumn("Units", format="%d"),
+                    },
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
         st.markdown("---")
 
